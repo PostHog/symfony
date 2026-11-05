@@ -118,6 +118,22 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('shop@example.com', $this->sendAndGetBody($email)['from']);
     }
 
+    #[DataProvider('getQuotedSenderNames')]
+    public function testSenderNameIsQuotedWhenItHasSpecialCharacters(string $name, string $expected)
+    {
+        $email = self::createEmail()->from(new Address('shop@example.com', $name));
+
+        $this->assertSame($expected, $this->sendAndGetBody($email)['from']);
+    }
+
+    public static function getQuotedSenderNames(): iterable
+    {
+        yield 'comma' => ['Shop, Inc', '"Shop, Inc" <shop@example.com>'];
+        yield 'quote' => ['Say "hi"', '"Say \\"hi\\"" <shop@example.com>'];
+        yield 'dot' => ['Shop Inc.', '"Shop Inc." <shop@example.com>'];
+        yield 'non ascii' => ['Jürgen', 'Jürgen <shop@example.com>'];
+    }
+
     public function testSendAttachmentAndInlineImage()
     {
         $email = self::createEmail()
@@ -283,6 +299,22 @@ class PostHogApiTransportTest extends TestCase
         ], $this->sendAndGetBody($email));
     }
 
+    public function testTemplateSendLeavesOutTheOptionsOfTheRenderedForm()
+    {
+        $email = (new RemoteTemplateEmail())
+            ->from('shop@example.com')
+            ->to('ana@example.com')
+            ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e');
+        $email->getHeaders()
+            ->addTextHeader('X-PostHog-Template-Key', 'order-shipped')
+            ->addTextHeader('X-PostHog-Capture-Engagement', 'false');
+
+        $this->assertSame([
+            'to' => 'ana@example.com',
+            'template_id' => '0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e',
+        ], $this->sendAndGetBody($email));
+    }
+
     public function testRemoteTemplateEmailWithoutTemplateIsSentRendered()
     {
         $email = (new RemoteTemplateEmail())
@@ -393,6 +425,18 @@ class PostHogApiTransportTest extends TestCase
                 ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e'),
             'template_with_content',
         ];
+
+        $email = self::createTemplateEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Template-Key', 'order shipped!');
+        yield 'template with an invalid template key' => [$email, 'invalid_template_key'];
+
+        $email = self::createTemplateEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Capture-Engagement', 'yes');
+        yield 'template with a capture engagement that is not a boolean' => [$email, 'unsupported_header'];
+
+        $email = self::createTemplateEmail();
+        $email->getHeaders()->add(new TrackingHeader(true, false));
+        yield 'template with mixed tracking' => [$email, 'mixed_tracking'];
     }
 
     #[DataProvider('getErrorResponses')]
@@ -506,6 +550,14 @@ class PostHogApiTransportTest extends TestCase
             ->subject('Your order shipped')
             ->html('<p>On its way.</p>')
             ->text('On its way.');
+    }
+
+    private static function createTemplateEmail(): RemoteTemplateEmail
+    {
+        return (new RemoteTemplateEmail())
+            ->from('shop@example.com')
+            ->to('ana@example.com')
+            ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e');
     }
 
     private static function createErrorResponse(int $statusCode, string $code, string $detail, ?string $attr = null, array $headers = []): MockResponse
