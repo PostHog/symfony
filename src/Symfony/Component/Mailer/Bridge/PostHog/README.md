@@ -34,6 +34,7 @@ PostHog cannot carry everything an email can hold. Instead of dropping a part of
  * `tags`, `metadata`: a `TagHeader` or a `MetadataHeader`
  * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses
  * `mixed_tracking`: a `TrackingHeader` with different values for opens and clicks
+ * `unsupported_part`: a body set with `setBody()` that holds more than the text, the HTML and the attachments of the email, such as an AMP part
  * `unsupported_priority`: a priority other than normal
  * `inline_without_cid`: an inline part that has no content id and that the HTML does not refer to by its name
  * `invalid_template_key`: an `X-PostHog-Template-Key` header that does not match `[a-zA-Z0-9_-]{1,400}`

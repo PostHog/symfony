@@ -26,7 +26,9 @@ use Symfony\Component\Mailer\Transport\RemoteTemplateTransportInterface;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Header\Headers;
+use Symfony\Component\Mime\Part\AbstractMultipartPart;
 use Symfony\Component\Mime\Part\DataPart;
+use Symfony\Component\Mime\Part\TextPart;
 use Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -126,6 +128,8 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
     private function getRenderedPayload(Email $email, string $templateKey, ?bool $captureEngagement): array
     {
+        $this->ensureBodyIsSupported($email);
+
         $payload = [];
 
         if ($from = $email->getFrom()) {
@@ -217,6 +221,29 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
         if ($envelope->getSender()->getAddress() !== ($email->getFrom()[0] ?? null)?->getAddress() || $expected !== $actual) {
             throw self::refuse('envelope_mismatch', 'the API sends to the recipients of the email, from its sender');
+        }
+    }
+
+    /**
+     * The request carries the text, the HTML and the attachments of the email, so a body set with setBody() can only hold those.
+     */
+    private function ensureBodyIsSupported(Email $email): void
+    {
+        $expected = ['plain' => null !== $email->getTextBody(), 'html' => null !== $email->getHtmlBody()];
+        $parts = [$email->getBody()];
+
+        while (null !== $part = array_shift($parts)) {
+            if ($part instanceof AbstractMultipartPart) {
+                array_push($parts, ...$part->getParts());
+            } elseif ($part instanceof DataPart) {
+                if (!\in_array($part, $email->getAttachments(), true)) {
+                    throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that is not an attachment of the email', $part->getMediaType(), $part->getMediaSubtype()));
+                }
+            } elseif ($part instanceof TextPart && ($expected[$part->getMediaSubtype()] ?? false)) {
+                $expected[$part->getMediaSubtype()] = false;
+            } else {
+                throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that the API cannot carry', $part->getMediaType(), $part->getMediaSubtype()));
+            }
         }
     }
 
