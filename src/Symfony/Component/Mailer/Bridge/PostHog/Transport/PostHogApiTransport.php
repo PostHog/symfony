@@ -228,16 +228,14 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             'content' => base64_encode($attachment->getBody()),
         ];
 
-        if ('inline' !== $attachment->getDisposition()) {
-            return $formatted;
-        }
+        if (null !== $reference = null === $html ? null : self::getReferencedContentId($attachment, $html)) {
+            $formatted['content_id'] = $reference;
+        } elseif ('inline' === $attachment->getDisposition()) {
+            if (!$attachment->hasContentId()) {
+                throw self::refuse('inline_without_cid', \sprintf('the inline part "%s" has no content id and the HTML does not refer to it', $attachment->getName()));
+            }
 
-        if ($attachment->hasContentId()) {
             $formatted['content_id'] = $attachment->getContentId();
-        } elseif (null !== $html && null !== $attachment->getName() && preg_match('/\b(?i:cid:)'.preg_quote($attachment->getName(), '/').'(?=[\s"\'>)]|$)/', $html)) {
-            $formatted['content_id'] = $attachment->getName();
-        } else {
-            throw self::refuse('inline_without_cid', \sprintf('the inline part "%s" has no content id and the HTML does not refer to it', $attachment->getName()));
         }
 
         return $formatted;
@@ -258,6 +256,12 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
     private function getCaptureEngagement(Headers $headers): ?bool
     {
+        $tracking = TrackingHeader::fromHeaders($headers);
+
+        if (null !== $tracking && $tracking->getOpens() !== $tracking->getClicks()) {
+            throw self::refuse('mixed_tracking', 'the API tracks opens and clicks together');
+        }
+
         if (null !== $value = $headers->getHeaderBody('X-PostHog-Capture-Engagement')) {
             return match ($value) {
                 'true' => true,
@@ -266,15 +270,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             };
         }
 
-        if (null === $tracking = TrackingHeader::fromHeaders($headers)) {
-            return null;
-        }
-
-        if ($tracking->getOpens() !== $tracking->getClicks()) {
-            throw self::refuse('mixed_tracking', 'the API tracks opens and clicks together');
-        }
-
-        return $tracking->getOpens();
+        return $tracking?->getOpens();
     }
 
     private function getErrorMessage(array $result, ResponseInterface $response): string
@@ -296,6 +292,22 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     private static function refuse(string $code, string $detail): LogicException
     {
         return new LogicException(\sprintf('PostHog cannot send this email: %s (%s).', $code, $detail));
+    }
+
+    /**
+     * Returns the reference the HTML uses for the part: its name or its content id.
+     *
+     * The HTML is sent as is, so the API must get the same reference. A content id that Symfony generates when it renders the body would break it.
+     */
+    private static function getReferencedContentId(DataPart $part, string $html): ?string
+    {
+        foreach ([$part->getName(), $part->hasContentId() ? $part->getContentId() : null] as $reference) {
+            if (null !== $reference && preg_match('/\b(?i:cid:)'.preg_quote($reference, '/').'(?=[\s"\'>)]|$)/', $html)) {
+                return $reference;
+            }
+        }
+
+        return null;
     }
 
     /**
