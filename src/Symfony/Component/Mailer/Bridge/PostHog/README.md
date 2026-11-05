@@ -25,7 +25,7 @@ where:
 
 PostHog has no SMTP relay, so the bridge only provides an API transport.
 
-The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept.
+The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes when it holds a special character such as a comma.
 
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 
@@ -76,7 +76,7 @@ $email = (new RemoteTemplateEmail())
     ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e', ['order' => '981']);
 ```
 
-The template sets the sender, the subject and the bodies. The "From" address is still needed by Symfony to build the envelope, but it is not sent.
+The template sets the sender, the subject and the bodies. The "From" address is still needed by Symfony to build the envelope, but it is not sent. The `X-PostHog-Template-Key` and `X-PostHog-Capture-Engagement` headers are checked as on any email, but they are not sent, because a template send does not take them.
 
 Errors and retries
 ------------------

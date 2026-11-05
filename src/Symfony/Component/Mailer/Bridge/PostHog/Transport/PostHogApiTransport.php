@@ -111,8 +111,11 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
         $this->ensureEnvelopeMatches($email, $envelope);
 
+        $templateKey = $this->getTemplateKey($headers);
+        $captureEngagement = $this->getCaptureEngagement($headers);
+
         $template = $email instanceof RemoteTemplateEmail ? $email->getRemoteTemplate() : null;
-        $payload = ['to' => $to[0]->getAddress()] + (null === $template ? $this->getRenderedPayload($email) : $this->getTemplatePayload($email, $template));
+        $payload = ['to' => $to[0]->getAddress()] + (null === $template ? $this->getRenderedPayload($email, $templateKey, $captureEngagement) : $this->getTemplatePayload($email, $template));
 
         if (null !== $distinctId = $headers->getHeaderBody('X-PostHog-Distinct-Id')) {
             $payload['distinct_id'] = $distinctId;
@@ -121,12 +124,12 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         return $payload;
     }
 
-    private function getRenderedPayload(Email $email): array
+    private function getRenderedPayload(Email $email, string $templateKey, ?bool $captureEngagement): array
     {
         $payload = [];
 
         if ($from = $email->getFrom()) {
-            $payload['from'] = '' === $from[0]->getName() ? $from[0]->getAddress() : $from[0]->getName().' <'.$from[0]->getAddress().'>';
+            $payload['from'] = self::formatSender($from[0]);
         }
 
         foreach (['cc' => $email->getCc(), 'bcc' => $email->getBcc(), 'reply_to' => $email->getReplyTo()] as $field => $addresses) {
@@ -151,9 +154,9 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             $payload['attachments'][] = $this->formatAttachment($attachment, $html);
         }
 
-        $payload['template_key'] = $this->getTemplateKey($email->getHeaders());
+        $payload['template_key'] = $templateKey;
 
-        if (null !== $captureEngagement = $this->getCaptureEngagement($email->getHeaders())) {
+        if (null !== $captureEngagement) {
             $payload['capture_engagement'] = $captureEngagement;
         }
 
@@ -162,6 +165,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
     /**
      * The template sets the sender, so the "From" address that Symfony requires only builds the envelope.
+     * The template key and the engagement capture belong to the rendered form, so they are not sent.
      */
     private function getTemplatePayload(Email $email, RemoteTemplate $template): array
     {
@@ -292,6 +296,18 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     private static function refuse(string $code, string $detail): LogicException
     {
         return new LogicException(\sprintf('PostHog cannot send this email: %s (%s).', $code, $detail));
+    }
+
+    /**
+     * The API parses the sender as an address, so a name with a special character is quoted.
+     */
+    private static function formatSender(Address $from): string
+    {
+        if ('' === $name = $from->getName()) {
+            return $from->getAddress();
+        }
+
+        return (strpbrk($name, '()<>[]:;@\\,."') ? $from->getEncodedName() : $name).' <'.$from->getAddress().'>';
     }
 
     /**
