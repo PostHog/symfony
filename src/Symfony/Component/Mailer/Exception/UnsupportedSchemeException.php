@@ -76,6 +76,10 @@ class UnsupportedSchemeException extends LogicException
             'class' => Bridge\Postal\Transport\PostalTransportFactory::class,
             'package' => 'symfony/postal-mailer',
         ],
+        'posthog' => [
+            'class' => Bridge\PostHog\Transport\PostHogTransportFactory::class,
+            'package' => 'symfony/post-hog-mailer',
+        ],
         'postmark' => [
             'class' => Bridge\Postmark\Transport\PostmarkTransportFactory::class,
             'package' => 'symfony/postmark-mailer',
