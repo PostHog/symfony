@@ -195,6 +195,14 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo.png', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
     }
 
+    public function testNonAsciiDistinctIdIsSentAsIs()
+    {
+        $email = self::createEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Distinct-Id', '用户42');
+
+        $this->assertSame('用户42', $this->sendAndGetBody($email)['distinct_id']);
+    }
+
     public function testExplicitBodyWithTheSameTextAndHtmlIsSent()
     {
         $email = self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html')));
