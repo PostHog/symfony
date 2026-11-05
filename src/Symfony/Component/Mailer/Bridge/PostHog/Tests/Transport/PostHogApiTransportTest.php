@@ -27,6 +27,9 @@ use Symfony\Component\Mailer\RemoteTemplateEmail;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Part\DataPart;
+use Symfony\Component\Mime\Part\Multipart\AlternativePart;
+use Symfony\Component\Mime\Part\Multipart\MixedPart;
+use Symfony\Component\Mime\Part\TextPart;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
 class PostHogApiTransportTest extends TestCase
@@ -190,6 +193,16 @@ class PostHogApiTransportTest extends TestCase
             ->attach('image-bytes', 'logo.png', 'image/png');
 
         $this->assertSame('logo.png', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testExplicitBodyWithTheSameTextAndHtmlIsSent()
+    {
+        $email = self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html')));
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame('On its way.', $body['text']);
+        $this->assertSame('<p>On its way.</p>', $body['html']);
     }
 
     public function testSendPostHogOptions()
@@ -415,6 +428,26 @@ class PostHogApiTransportTest extends TestCase
         $email = self::createEmail();
         $email->getHeaders()->add(new TrackingHeader(true, false));
         yield 'mixed tracking' => [$email, 'mixed_tracking'];
+
+        yield 'explicit body with an AMP part' => [
+            self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'), new TextPart('<!doctype html><html amp4email></html>', 'utf-8', 'x-amp-html'))),
+            'unsupported_part',
+        ];
+
+        yield 'explicit body with a part that is not an attachment' => [
+            self::createEmail()->setBody(new MixedPart(new TextPart('On its way.'), new DataPart('BEGIN:VCALENDAR', 'invite.ics', 'text/calendar'))),
+            'unsupported_part',
+        ];
+
+        yield 'explicit body with a second text part' => [
+            self::createEmail()->setBody(new MixedPart(new TextPart('On its way.'), new TextPart('And a second one.'))),
+            'unsupported_part',
+        ];
+
+        yield 'explicit HTML part without an HTML body' => [
+            (new Email())->from('shop@example.com')->to('ana@example.com')->subject('Your order shipped')->text('On its way.')->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
 
         $email = self::createEmail();
         $email->getHeaders()
