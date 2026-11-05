@@ -625,9 +625,6 @@ class PostHogApiTransportTest extends TestCase
             ->text('On its way.');
     }
 
-    /**
-     * @return resource
-     */
     private static function createNonSeekableStream(string $contents)
     {
         $wrapper = new class {
