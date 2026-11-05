@@ -186,6 +186,24 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
     }
 
+    public function testContentIdThatStartsWithThePartNameIsMatchedInFull()
+    {
+        $email = self::createEmail()
+            ->html('<img src="cid:logo\'v2@shop.example">')
+            ->addPart((new DataPart('image-bytes', 'logo', 'image/png'))->asInline()->setContentId('logo\'v2@shop.example'));
+
+        $this->assertSame('logo\'v2@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testUnquotedReferenceEndsAtTheClosingParenthesis()
+    {
+        $email = self::createEmail()
+            ->html('<div style="background: url(cid:logo)">')
+            ->embed('image-bytes', 'logo', 'image/png');
+
+        $this->assertSame('logo', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
     public function testAttachmentReferencedByTheHtmlIsSentInline()
     {
         $email = self::createEmail()
