@@ -203,6 +203,13 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('用户42', $this->sendAndGetBody($email)['distinct_id']);
     }
 
+    public function testNonSeekableHtmlStreamIsReadOnce()
+    {
+        $email = self::createEmail()->html(self::createNonSeekableStream('<p>On its way.</p>'));
+
+        $this->assertSame('<p>On its way.</p>', $this->sendAndGetBody($email)['html']);
+    }
+
     public function testExplicitBodyWithTheSameTextAndHtmlIsSent()
     {
         $email = self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html')));
@@ -616,6 +623,57 @@ class PostHogApiTransportTest extends TestCase
             ->subject('Your order shipped')
             ->html('<p>On its way.</p>')
             ->text('On its way.');
+    }
+
+    /**
+     * @return resource
+     */
+    private static function createNonSeekableStream(string $contents)
+    {
+        $wrapper = new class {
+            public static string $contents = '';
+            public mixed $context;
+            private string $left = '';
+
+            public function stream_open(string $path, string $mode, int $options, ?string &$openedPath): bool
+            {
+                $this->left = self::$contents;
+
+                return true;
+            }
+
+            public function stream_read(int $count): string
+            {
+                $chunk = substr($this->left, 0, $count);
+                $this->left = substr($this->left, \strlen($chunk));
+
+                return $chunk;
+            }
+
+            public function stream_eof(): bool
+            {
+                return '' === $this->left;
+            }
+
+            public function stream_seek(int $offset, int $whence): bool
+            {
+                return false;
+            }
+
+            public function stream_stat(): array
+            {
+                return [];
+            }
+        };
+        $wrapper::$contents = $contents;
+
+        stream_wrapper_register('posthog-test', $wrapper::class);
+
+        try {
+            return fopen('posthog-test://body', 'r');
+        } finally {
+            stream_wrapper_unregister('posthog-test');
+        }
     }
 
     private static function createTemplateEmail(): RemoteTemplateEmail
