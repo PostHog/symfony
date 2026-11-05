@@ -334,11 +334,15 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
      * Returns the reference the HTML uses for the part: its name or its content id.
      *
      * The HTML is sent as is, so the API must get the same reference. A content id that Symfony generates when it renders the body would break it.
+     * A quoted reference runs to its closing quote, an unquoted one such as url(cid:logo) to whitespace, a quote, ">" or ")".
      */
     private static function getReferencedContentId(DataPart $part, string $html): ?string
     {
+        preg_match_all('/(["\'])cid:(.*?)\1|(?<!["\'])\bcid:([^\s"\'>)]+)/i', $html, $matches, \PREG_SET_ORDER);
+        $references = array_map(static fn (array $match): string => $match[3] ?? $match[2], $matches);
+
         foreach ([$part->getName(), $part->hasContentId() ? $part->getContentId() : null] as $reference) {
-            if (null !== $reference && preg_match('/\b(?i:cid:)'.preg_quote($reference, '/').'(?=[\s"\'>)]|$)/', $html)) {
+            if (null !== $reference && \in_array($reference, $references, true)) {
                 return $reference;
             }
         }
