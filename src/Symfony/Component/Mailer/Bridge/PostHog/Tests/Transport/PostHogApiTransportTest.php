@@ -173,6 +173,25 @@ class PostHogApiTransportTest extends TestCase
         ]], $this->sendAndGetBody($email)['attachments']);
     }
 
+    public function testEmbeddedImageKeepsItsNameAfterTheBodyIsRendered()
+    {
+        $email = self::createEmail()
+            ->html('<img src="cid:logo">')
+            ->embed('image-bytes', 'logo', 'image/png');
+        $email->getBody();
+
+        $this->assertSame('logo', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testAttachmentReferencedByTheHtmlIsSentInline()
+    {
+        $email = self::createEmail()
+            ->html('<img src="cid:logo.png">')
+            ->attach('image-bytes', 'logo.png', 'image/png');
+
+        $this->assertSame('logo.png', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
     public function testSendPostHogOptions()
     {
         $email = self::createEmail();
@@ -227,10 +246,10 @@ class PostHogApiTransportTest extends TestCase
     {
         $email = self::createEmail();
         $email->getHeaders()
-            ->add(new TrackingHeader(true, false))
-            ->addTextHeader('X-PostHog-Capture-Engagement', 'true');
+            ->add(new TrackingHeader(true, true))
+            ->addTextHeader('X-PostHog-Capture-Engagement', 'false');
 
-        $this->assertTrue($this->sendAndGetBody($email)['capture_engagement']);
+        $this->assertFalse($this->sendAndGetBody($email)['capture_engagement']);
     }
 
     public function testTemplateKeyComesFromADefaultHeader()
@@ -396,6 +415,12 @@ class PostHogApiTransportTest extends TestCase
         $email = self::createEmail();
         $email->getHeaders()->add(new TrackingHeader(true, false));
         yield 'mixed tracking' => [$email, 'mixed_tracking'];
+
+        $email = self::createEmail();
+        $email->getHeaders()
+            ->add(new TrackingHeader(true, false))
+            ->addTextHeader('X-PostHog-Capture-Engagement', 'true');
+        yield 'mixed tracking with a capture engagement header' => [$email, 'mixed_tracking'];
 
         yield 'priority other than normal' => [self::createEmail()->priority(Email::PRIORITY_HIGH), 'unsupported_priority'];
 
