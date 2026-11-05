@@ -128,6 +128,15 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
     private function getRenderedPayload(Email $email, string $templateKey, ?bool $captureEngagement): array
     {
+        // a stream can only be read once, so its contents are kept for the checks and the request
+        if (\is_resource($text = $email->getTextBody())) {
+            $email->text(self::bodyToString($text), $email->getTextCharset());
+        }
+
+        if (\is_resource($html = $email->getHtmlBody())) {
+            $email->html(self::bodyToString($html), $email->getHtmlCharset());
+        }
+
         $this->ensureBodyIsSupported($email);
 
         $payload = [];
