@@ -70,7 +70,7 @@ class PostHogApiTransportTest extends TestCase
 
             $this->assertEquals([
                 'to' => 'ana@example.com',
-                'from' => 'Shop <shop@example.com>',
+                'from' => '"Shop" <shop@example.com>',
                 'subject' => 'Your order shipped',
                 'html' => '<p>On its way.</p>',
                 'text' => 'On its way.',
@@ -94,7 +94,7 @@ class PostHogApiTransportTest extends TestCase
         $body = $this->sendAndGetBody($email);
 
         $this->assertSame('ana@example.com', $body['to']);
-        $this->assertSame('Shop <shop@example.com>', $body['from']);
+        $this->assertSame('"Shop" <shop@example.com>', $body['from']);
         $this->assertSame(['bo@example.com'], $body['cc']);
         $this->assertSame(['help@example.com'], $body['reply_to']);
     }
@@ -122,7 +122,7 @@ class PostHogApiTransportTest extends TestCase
     }
 
     #[DataProvider('getQuotedSenderNames')]
-    public function testSenderNameIsQuotedWhenItHasSpecialCharacters(string $name, string $expected)
+    public function testSenderNameIsQuoted(string $name, string $expected)
     {
         $email = self::createEmail()->from(new Address('shop@example.com', $name));
 
@@ -131,10 +131,11 @@ class PostHogApiTransportTest extends TestCase
 
     public static function getQuotedSenderNames(): iterable
     {
+        yield 'plain' => ['Shop', '"Shop" <shop@example.com>'];
         yield 'comma' => ['Shop, Inc', '"Shop, Inc" <shop@example.com>'];
         yield 'quote' => ['Say "hi"', '"Say \\"hi\\"" <shop@example.com>'];
         yield 'dot' => ['Shop Inc.', '"Shop Inc." <shop@example.com>'];
-        yield 'non ascii' => ['Jürgen', 'Jürgen <shop@example.com>'];
+        yield 'non ascii' => ['Jürgen', '"Jürgen" <shop@example.com>'];
     }
 
     public function testSendAttachmentAndInlineImage()
@@ -301,6 +302,16 @@ class PostHogApiTransportTest extends TestCase
             new MockResponse('', ['error' => 'Connection refused']),
             'Unable to upload the attachment "invoice.pdf": could not reach the file storage of PostHog.',
         ];
+
+        yield 'storage disconnects while it answers an error' => [
+            $slot($upload),
+            new MockResponse((static function (): iterable {
+                yield '<?xml version="1.0"?><Error>';
+
+                throw new \RuntimeException('Connection reset by peer');
+            })(), ['http_code' => 500]),
+            'Unable to upload the attachment "invoice.pdf": could not reach the file storage of PostHog.',
+        ];
     }
 
     public function testEmbeddedImageReferencedByItsNameUsesTheNameAsContentId()
@@ -334,6 +345,18 @@ class PostHogApiTransportTest extends TestCase
             ->addPart((new DataPart('image-bytes', 'logo', 'image/png'))->asInline()->setContentId('logo\'v2@shop.example'));
 
         $this->assertSame('logo\'v2@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testInlinePartWithoutANameKeepsTheOtherReferencesOfTheHtml()
+    {
+        $email = self::createEmail()
+            ->html('<img src="cid:banner@cdn.example">')
+            ->addPart((new DataPart('logo-bytes', null, 'image/png'))->asInline()->setContentId('logo@shop.example'));
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame('<img src="cid:banner@cdn.example">', $body['html']);
+        $this->assertSame('logo@shop.example', $body['attachments'][0]['content_id']);
     }
 
     public function testUnquotedReferenceEndsAtTheClosingParenthesis()
@@ -396,7 +419,7 @@ class PostHogApiTransportTest extends TestCase
 
             $this->assertEquals([
                 'to' => 'ana@example.com',
-                'from' => 'Shop <shop@example.com>',
+                'from' => '"Shop" <shop@example.com>',
                 'subject' => 'Your order shipped',
                 'html' => '<p>On its way.</p>',
                 'text' => 'On its way.',
@@ -448,6 +471,7 @@ class PostHogApiTransportTest extends TestCase
         yield 'default flag left out' => ['opens=default; clicks=true', ['clicks' => true]];
         yield 'as TrackingHeader writes it' => [(new TrackingHeader(true))->getBodyAsString(), ['opens' => true]];
         yield 'spaces and a trailing separator' => [' opens = false ; ', ['opens' => false]];
+        yield 'empty part after a separator' => ['opens=true;', ['opens' => true]];
     }
 
     public function testClicksWithoutOpensIsSentInOneRequest()
@@ -727,6 +751,32 @@ class PostHogApiTransportTest extends TestCase
             self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf')->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
             'unsupported_part',
         ];
+
+        yield 'explicit body with another text' => [
+            self::createEmail()->setBody(new AlternativePart(new TextPart('Something else.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
+
+        yield 'explicit body with another HTML' => [
+            self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>Something else.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
+
+        yield 'explicit body with the text in another charset' => [
+            self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.', 'iso-8859-1'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
+
+        yield 'attachment with a content type parameter' => [
+            self::createEmail()->addPart((new DataPart('BEGIN:VCALENDAR', 'invite.ics', 'text/calendar'))->setContentTypeParameter('method', 'REQUEST')),
+            'unsupported_part',
+        ];
+
+        foreach (['X-PostHog-Distinct-Id' => 'user-42', 'X-PostHog-Template-Key' => 'receipt', 'X-PostHog-Idempotency-Key' => 'order-42', 'X-PostHog-Sensitive' => 'true', 'X-PostHog-Capture-Engagement' => 'true'] as $name => $value) {
+            $email = self::createEmail([$name => $value]);
+            $email->getHeaders()->addTextHeader($name, $value);
+            yield 'second '.$name.' header' => [$email, 'unsupported_header'];
+        }
 
         yield 'text in a charset that cannot be converted' => [self::createEmail()->text('On its way.', 'x-unknown-charset'), 'unsupported_part'];
 
