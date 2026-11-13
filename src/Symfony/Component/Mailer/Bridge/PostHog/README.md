@@ -28,10 +28,12 @@ PostHog has no SMTP relay, so the bridge only provides an API transport.
 The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses with ASCII domains for recipients, so their display names are not sent and a domain such as `bücher.example` is sent in Punycode; the display name of the sender is kept, in quotes when it holds a character such as a comma or a dot. An inline part is referred to by its name or by its content id, set with `setContentId()` or as a `Content-ID` header, and an attachment without a name is named after its type, such as `attachment.pdf`.
 
 Attachments are uploaded before the email is sent. The transport asks PostHog which files it does not have yet,
-uploads each of them to the file storage URL that PostHog answers, without the secret key or any credential set on
-the HTTP client, and then sends the email naming each file by its SHA-256. A file that PostHog already has is not
-uploaded again, and the same file attached twice is uploaded once. The file storage is not on the host of the DSN,
-so a network that limits outgoing requests must allow it. A failed upload sends no email.
+uploads each of them to the file storage URL that PostHog answers, without the secret key and without the
+`auth_basic`, `auth_bearer`, `Authorization` and `Cookie` defaults of the HTTP client, and then sends the email naming
+each file by its SHA-256. Other default headers of the HTTP client, such as an API key header, go to the file storage
+too. A file that PostHog already has is not uploaded again, and the same file attached twice is uploaded once. The
+file storage is not on the host of the DSN, so a network that limits outgoing requests must allow it. A failed upload
+sends no email.
 
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 

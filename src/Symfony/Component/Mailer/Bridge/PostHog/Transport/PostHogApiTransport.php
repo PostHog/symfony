@@ -147,10 +147,13 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         }
 
         foreach ($uploads as $sha256 => $slot) {
-            // the credentials that the app set on its HTTP client are for other hosts, so none of them goes to the file storage
+            // the credentials that the app set on its HTTP client are for other hosts, so they do not go to the file storage
             $storageHeaders = $slot['headers'];
-            if (!array_filter(array_keys($storageHeaders), static fn ($name): bool => \is_string($name) && 0 === strcasecmp($name, 'Authorization'))) {
-                $storageHeaders['Authorization'] = [];
+            $named = array_map(strtolower(...), array_filter(array_keys($storageHeaders), \is_string(...)));
+            foreach (['authorization', 'cookie'] as $name) {
+                if (!\in_array($name, $named, true)) {
+                    $storageHeaders[$name] = [];
+                }
             }
 
             $upload = $this->client->request($slot['method'] ?? 'PUT', $slot['url'], [

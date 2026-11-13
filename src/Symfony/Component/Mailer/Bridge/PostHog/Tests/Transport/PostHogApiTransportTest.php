@@ -475,6 +475,16 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('Bearer KEY', self::getHeader($send['options'], 'Authorization'));
     }
 
+    public function testUploadSendsTheCredentialsThatPostHogNamesForTheFileStorage()
+    {
+        $requests = [];
+        $client = self::createPostHog($requests, [], ['Authorization' => 'Storage SIGNATURE', 'Cookie' => 'storage=TOKEN'])->withOptions(['auth_bearer' => 'APP-TOKEN']);
+        (new PostHogApiTransport('KEY', $client))->send(self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf'));
+
+        $this->assertSame('Storage SIGNATURE', self::getHeader($requests[1]['options'], 'Authorization'));
+        $this->assertSame('storage=TOKEN', self::getHeader($requests[1]['options'], 'Cookie'));
+    }
+
     public static function getClientCredentials(): iterable
     {
         yield 'bearer token' => [['auth_bearer' => 'APP-TOKEN']];
@@ -1157,15 +1167,15 @@ class PostHogApiTransportTest extends TestCase
      *
      * @param string[] $present the SHA-256 of the files PostHog already has
      */
-    private static function createPostHog(array &$requests, array $present = []): MockHttpClient
+    private static function createPostHog(array &$requests, array $present = [], array $storageHeaders = []): MockHttpClient
     {
-        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$requests, $present): ResponseInterface {
+        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$requests, $present, $storageHeaders): ResponseInterface {
             $requests[] = ['method' => $method, 'url' => $url, 'options' => $options];
 
             if (str_ends_with($url, '/messaging/attachments/uploads/')) {
                 return new JsonMockResponse(['files' => array_map(static fn (array $file): array => \in_array($file['sha256'], $present, true)
                     ? ['sha256' => $file['sha256'], 'status' => 'present']
-                    : ['sha256' => $file['sha256'], 'status' => 'upload', 'url' => 'https://storage.example.com/'.$file['sha256'], 'method' => 'PUT', 'headers' => ['x-amz-checksum-sha256' => $file['sha256']], 'expires_at' => '2026-11-13T12:00:00Z'],
+                    : ['sha256' => $file['sha256'], 'status' => 'upload', 'url' => 'https://storage.example.com/'.$file['sha256'], 'method' => 'PUT', 'headers' => ['x-amz-checksum-sha256' => $file['sha256']] + $storageHeaders, 'expires_at' => '2026-11-13T12:00:00Z'],
                     json_decode($options['body'], true)['files'])]);
             }
 
