@@ -292,6 +292,12 @@ class PostHogApiTransportTest extends TestCase
             'Unable to upload the attachment "invoice.pdf": PostHog named an upload URL that is not https.',
         ];
 
+        yield 'file storage redirects the upload' => [
+            $slot($upload),
+            new MockResponse('', ['http_code' => 307, 'response_headers' => ['Location' => 'https://elsewhere.example.com/invoice']]),
+            'Unable to upload the attachment "invoice.pdf": the file storage answered (code 307).',
+        ];
+
         yield 'no slot for the file' => [
             [['files' => []]],
             null,
