@@ -130,6 +130,22 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('shop@xn--bcher-kva.example', $bare['from']);
     }
 
+    public function testRecipientDomainsAreSentInPunycode()
+    {
+        $email = self::createEmail()
+            ->to(new Address('ana@bücher.example', 'Ana'))
+            ->cc('bo@bücher.example')
+            ->bcc('cy@bücher.example')
+            ->replyTo('help@bücher.example');
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame('ana@xn--bcher-kva.example', $body['to']);
+        $this->assertSame(['bo@xn--bcher-kva.example'], $body['cc']);
+        $this->assertSame(['cy@xn--bcher-kva.example'], $body['bcc']);
+        $this->assertSame(['help@xn--bcher-kva.example'], $body['reply_to']);
+    }
+
     #[DataProvider('getSenderNames')]
     public function testSenderNameIsQuotedOnlyWhenItHoldsAReservedCharacter(string $name, string $expected)
     {
@@ -786,6 +802,14 @@ class PostHogApiTransportTest extends TestCase
         $email = self::createEmail();
         $email->getHeaders()->addTextHeader('X-PostHog-Template-Key', 'order shipped!');
         yield 'invalid template key' => [$email, 'invalid_template_key'];
+
+        // IDNA has no ASCII form for a domain that mixes right-to-left and left-to-right labels
+        yield 'recipient domain without an ascii form' => [self::createEmail()->to("ana@\u{05D0}a.example"), 'unsupported_address'];
+        yield 'copy domain without an ascii form' => [self::createEmail()->cc("bo@\u{05D0}a.example"), 'unsupported_address'];
+        yield 'blind copy domain without an ascii form' => [self::createEmail()->bcc("cy@\u{05D0}a.example"), 'unsupported_address'];
+        yield 'reply-to domain without an ascii form' => [self::createEmail()->replyTo("help@\u{05D0}a.example"), 'unsupported_address'];
+        yield 'sender domain without an ascii form' => [self::createEmail()->from("shop@\u{05D0}a.example"), 'unsupported_address'];
+        yield 'named sender domain without an ascii form' => [self::createEmail()->from(new Address("shop@\u{05D0}a.example", 'Shop')), 'unsupported_address'];
 
         yield 'more than one recipient' => [self::createEmail()->to('ana@example.com', 'bo@example.com'), 'multiple_to'];
 
