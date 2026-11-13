@@ -144,22 +144,163 @@ class PostHogApiTransportTest extends TestCase
             ->addPart(new DataPart('%PDF-1.4'."\n", 'invoice.pdf', 'application/pdf'))
             ->addPart((new DataPart('image-bytes', 'logo.png', 'image/png'))->asInline()->setContentId('logo@example.com'));
 
-        $body = $this->sendAndGetBody($email);
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests)))->setHost('eu.posthog.com')->send($email);
 
+        [$uploads, $invoice, $logo, $send] = $requests;
+
+        $this->assertSame(['POST', 'https://eu.posthog.com/api/projects/@current/messaging/attachments/uploads/'], [$uploads['method'], $uploads['url']]);
+        $this->assertContains('Authorization: Bearer KEY', $uploads['options']['headers']);
+        $this->assertSame(['files' => [
+            ['sha256' => hash('sha256', '%PDF-1.4'."\n"), 'size' => 9],
+            ['sha256' => hash('sha256', 'image-bytes'), 'size' => 11],
+        ]], json_decode($uploads['options']['body'], true));
+
+        $this->assertSame(['PUT', 'https://storage.example.com/'.hash('sha256', '%PDF-1.4'."\n")], [$invoice['method'], $invoice['url']]);
+        $this->assertSame('%PDF-1.4'."\n", $invoice['options']['body']);
+        $this->assertContains('x-amz-checksum-sha256: '.hash('sha256', '%PDF-1.4'."\n"), $invoice['options']['headers']);
+        $this->assertNull(self::getHeader($invoice['options'], 'Authorization'));
+        $this->assertSame(0, $invoice['options']['max_redirects']);
+        $this->assertSame('image-bytes', $logo['options']['body']);
+
+        $body = json_decode($send['options']['body'], true);
+        $this->assertSame('https://eu.posthog.com/api/projects/@current/messaging/send/email/', $send['url']);
         $this->assertSame('<img src="cid:logo@example.com">', $body['html']);
         $this->assertSame([
             [
+                'sha256' => hash('sha256', '%PDF-1.4'."\n"),
                 'filename' => 'invoice.pdf',
                 'content_type' => 'application/pdf',
-                'content' => 'JVBERi0xLjQK',
             ],
             [
+                'sha256' => hash('sha256', 'image-bytes'),
                 'filename' => 'logo.png',
                 'content_type' => 'image/png',
-                'content' => base64_encode('image-bytes'),
                 'content_id' => 'logo@example.com',
             ],
         ], $body['attachments']);
+    }
+
+    public function testEmailWithoutAttachmentsUploadsNothing()
+    {
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests)))->send(self::createEmail());
+
+        $this->assertCount(1, $requests);
+        $this->assertStringEndsWith('/messaging/send/email/', $requests[0]['url']);
+    }
+
+    public function testFileThatPostHogAlreadyHasIsNotUploaded()
+    {
+        $email = self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf');
+
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests, [hash('sha256', '%PDF-1.4')])))->send($email);
+
+        $this->assertSame(['POST', 'POST'], array_column($requests, 'method'));
+        $this->assertSame(hash('sha256', '%PDF-1.4'), json_decode($requests[1]['options']['body'], true)['attachments'][0]['sha256']);
+    }
+
+    public function testSameFileInTwoAttachmentsIsUploadedOnce()
+    {
+        $email = self::createEmail()
+            ->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf')
+            ->attach('%PDF-1.4', 'copy.pdf', 'application/pdf');
+
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests)))->send($email);
+
+        $this->assertSame(['POST', 'PUT', 'POST'], array_column($requests, 'method'));
+        $this->assertSame([['sha256' => hash('sha256', '%PDF-1.4'), 'size' => 8]], json_decode($requests[0]['options']['body'], true)['files']);
+        $this->assertSame(['invoice.pdf', 'copy.pdf'], array_column(json_decode($requests[2]['options']['body'], true)['attachments'], 'filename'));
+    }
+
+    #[DataProvider('getUploadFailures')]
+    public function testFailedUploadSendsNoEmail(array $uploadsAnswer, ?MockResponse $storageAnswer, string $message)
+    {
+        $email = self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf');
+
+        $requests = [];
+        $client = new MockHttpClient(function (string $method, string $url, array $options) use (&$requests, $uploadsAnswer, $storageAnswer): ResponseInterface {
+            $requests[] = $method.' '.$url;
+
+            if (str_ends_with($url, '/messaging/send/email/')) {
+                $this->fail('No email must be sent.');
+            }
+
+            if (str_ends_with($url, '/messaging/attachments/uploads/')) {
+                return new JsonMockResponse(...$uploadsAnswer);
+            }
+
+            return $storageAnswer ?? $this->fail('No file must be uploaded.');
+        });
+
+        try {
+            (new PostHogApiTransport('KEY', $client))->send($email);
+            $this->fail('The send must fail.');
+        } catch (HttpTransportException $e) {
+            $this->assertSame($message, $e->getMessage());
+        }
+    }
+
+    public static function getUploadFailures(): iterable
+    {
+        $slot = static fn (array $slot): array => [['files' => [$slot + ['sha256' => hash('sha256', '%PDF-1.4')]]]];
+        $upload = ['status' => 'upload', 'url' => 'https://storage.example.com/invoice', 'method' => 'PUT', 'headers' => []];
+
+        yield 'project cannot send files' => [
+            [['type' => 'validation_error', 'code' => 'field_not_accepted', 'detail' => "This project can't send files yet, so PostHog didn't prepare the uploads.", 'attr' => 'files'], ['http_code' => 400]],
+            null,
+            'Unable to upload the attachments: This project can\'t send files yet, so PostHog didn\'t prepare the uploads. [field_not_accepted, field "files"] (code 400).',
+        ];
+
+        yield 'daily upload quota used up' => [
+            [['type' => 'throttled_error', 'code' => 'upload_quota_exceeded', 'detail' => 'This project uploaded as many file bytes as it can today.'], ['http_code' => 429]],
+            null,
+            'Unable to upload the attachments: This project uploaded as many file bytes as it can today. [upload_quota_exceeded] (code 429).',
+        ];
+
+        yield 'upload URL that is not https' => [
+            $slot(['url' => 'http://storage.example.com/invoice'] + $upload),
+            null,
+            'Unable to upload the attachment "invoice.pdf": PostHog named an upload URL that is not https.',
+        ];
+
+        yield 'no slot for the file' => [
+            [['files' => []]],
+            null,
+            'Unable to upload the attachments: PostHog answered without an upload slot for each file.',
+        ];
+
+        yield 'slot for another file' => [
+            [['files' => [['sha256' => hash('sha256', 'other'), 'status' => 'present']]]],
+            null,
+            'Unable to upload the attachments: PostHog answered without an upload slot for each file.',
+        ];
+
+        yield 'upload slot without a URL' => [
+            $slot(['status' => 'upload', 'method' => 'PUT', 'headers' => []]),
+            null,
+            'Unable to upload the attachments: PostHog answered without an upload slot for each file.',
+        ];
+
+        yield 'storage refuses the upload' => [
+            $slot($upload),
+            new MockResponse('<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>', ['http_code' => 403]),
+            'Unable to upload the attachment "invoice.pdf": AccessDenied, Request has expired (code 403).',
+        ];
+
+        yield 'storage redirects' => [
+            $slot($upload),
+            new MockResponse('', ['http_code' => 307, 'response_headers' => ['Location' => 'https://elsewhere.example.com/']]),
+            'Unable to upload the attachment "invoice.pdf": the file storage answered (code 307).',
+        ];
+
+        yield 'storage cannot be reached' => [
+            $slot($upload),
+            new MockResponse('', ['error' => 'Connection refused']),
+            'Unable to upload the attachment "invoice.pdf": could not reach the file storage of PostHog.',
+        ];
     }
 
     public function testEmbeddedImageReferencedByItsNameUsesTheNameAsContentId()
@@ -169,9 +310,9 @@ class PostHogApiTransportTest extends TestCase
             ->embed('image-bytes', 'logo', 'image/png');
 
         $this->assertSame([[
+            'sha256' => hash('sha256', 'image-bytes'),
             'filename' => 'logo',
             'content_type' => 'image/png',
-            'content' => base64_encode('image-bytes'),
             'content_id' => 'logo',
         ]], $this->sendAndGetBody($email)['attachments']);
     }
@@ -245,7 +386,8 @@ class PostHogApiTransportTest extends TestCase
             ->addTextHeader('X-PostHog-Distinct-Id', 'user_42')
             ->addTextHeader('X-PostHog-Template-Key', 'order-shipped')
             ->addTextHeader('X-PostHog-Idempotency-Key', 'order-981-shipped')
-            ->addTextHeader('X-PostHog-Capture-Engagement', 'false');
+            ->addTextHeader('X-PostHog-Capture-Engagement', 'false')
+            ->addTextHeader('X-PostHog-Sensitive', 'true');
 
         $client = new MockHttpClient(function (string $method, string $url, array $options): ResponseInterface {
             $this->assertSame('order-981-shipped', self::getHeader($options, 'Idempotency-Key'));
@@ -260,7 +402,8 @@ class PostHogApiTransportTest extends TestCase
                 'text' => 'On its way.',
                 'template_key' => 'order-shipped',
                 'distinct_id' => 'user_42',
-                'capture_engagement' => false,
+                'tracking' => ['engagement' => false],
+                'sensitive' => true,
             ], json_decode($options['body'], true));
 
             return new JsonMockResponse(['message_id' => 'msg-1234', 'replayed' => false], ['http_code' => 202]);
@@ -270,32 +413,109 @@ class PostHogApiTransportTest extends TestCase
     }
 
     #[DataProvider('getTrackingData')]
-    public function testTrackingHeaderSetsCaptureEngagementWhenBothFlagsAgree(TrackingHeader $tracking, ?bool $expected)
+    public function testTrackingHeaderSetsOpenAndClickTracking(TrackingHeader $tracking, ?array $expected)
     {
         $email = self::createEmail();
         $email->getHeaders()->add($tracking);
 
         $body = $this->sendAndGetBody($email);
 
-        $this->assertSame($expected, $body['capture_engagement'] ?? null);
-        $this->assertSame(null !== $expected, \array_key_exists('capture_engagement', $body));
+        $this->assertSame($expected, $body['tracking'] ?? null);
+        $this->assertArrayNotHasKey('capture_engagement', $body);
     }
 
     public static function getTrackingData(): iterable
     {
-        yield 'both on' => [new TrackingHeader(true, true), true];
-        yield 'both off' => [new TrackingHeader(false, false), false];
+        yield 'both on' => [new TrackingHeader(true, true), ['opens' => true, 'clicks' => true]];
+        yield 'both off' => [new TrackingHeader(false, false), ['opens' => false, 'clicks' => false]];
+        yield 'opens without clicks' => [new TrackingHeader(true, false), ['opens' => true, 'clicks' => false]];
+        yield 'opens only' => [new TrackingHeader(true), ['opens' => true]];
+        yield 'clicks only' => [new TrackingHeader(null, true), ['clicks' => true]];
+        yield 'clicks without opens, which PostHog refuses' => [new TrackingHeader(false, true), ['opens' => false, 'clicks' => true]];
         yield 'both default' => [new TrackingHeader(), null];
     }
 
-    public function testCaptureEngagementHeaderWinsOverTheTrackingHeader()
+    #[DataProvider('getTrackingTextData')]
+    public function testTrackingTextHeaderIsReadLikeTheTrackingHeader(string $value, ?array $expected)
+    {
+        $this->assertSame($expected, $this->sendAndGetBody(self::createEmail(['X-Track' => $value]))['tracking'] ?? null);
+    }
+
+    public static function getTrackingTextData(): iterable
+    {
+        yield 'both set' => ['opens=true; clicks=false', ['opens' => true, 'clicks' => false]];
+        yield 'clicks without opens, which PostHog refuses' => ['opens=false; clicks=true', ['opens' => false, 'clicks' => true]];
+        yield 'default flag left out' => ['opens=default; clicks=true', ['clicks' => true]];
+        yield 'as TrackingHeader writes it' => [(new TrackingHeader(true))->getBodyAsString(), ['opens' => true]];
+        yield 'spaces and a trailing separator' => [' opens = false ; ', ['opens' => false]];
+    }
+
+    public function testClicksWithoutOpensIsSentInOneRequest()
+    {
+        $email = self::createEmail(['X-Track' => 'opens=false; clicks=true']);
+
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests)))->send($email);
+
+        $this->assertCount(1, $requests);
+        $this->assertSame(['opens' => false, 'clicks' => true], json_decode($requests[0]['options']['body'], true)['tracking']);
+    }
+
+    #[DataProvider('getCharsetData')]
+    public function testBodiesAreSentAsUtf8(Email $email, string $field, string $expected)
+    {
+        $this->assertSame($expected, $this->sendAndGetBody($email)[$field]);
+    }
+
+    public static function getCharsetData(): iterable
+    {
+        yield 'latin-1 text' => [self::createEmail()->text("Gr\xfc\xdfe", 'iso-8859-1'), 'text', 'Grüße'];
+        yield 'latin-1 HTML' => [self::createEmail()->html("<p>Gr\xfc\xdfe</p>", 'ISO-8859-1'), 'html', '<p>Grüße</p>'];
+        yield 'utf-8 text' => [self::createEmail()->text('Grüße'), 'text', 'Grüße'];
+    }
+
+    public function testCaptureEngagementHeaderJoinsTheTrackingHeader()
     {
         $email = self::createEmail();
         $email->getHeaders()
             ->add(new TrackingHeader(true, true))
             ->addTextHeader('X-PostHog-Capture-Engagement', 'false');
 
-        $this->assertFalse($this->sendAndGetBody($email)['capture_engagement']);
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame(['opens' => true, 'clicks' => true, 'engagement' => false], $body['tracking']);
+        $this->assertArrayNotHasKey('capture_engagement', $body);
+    }
+
+    #[DataProvider('getSensitiveData')]
+    public function testSensitiveHeaderIsPassedThrough(string $value, bool $expected)
+    {
+        $email = self::createEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Sensitive', $value);
+
+        $this->assertSame($expected, $this->sendAndGetBody($email)['sensitive']);
+    }
+
+    public static function getSensitiveData(): iterable
+    {
+        yield 'sensitive' => ['true', true];
+        yield 'not sensitive' => ['false', false];
+    }
+
+    public function testEmailWithoutOptionsLeavesTrackingAndSensitivityToPostHog()
+    {
+        $body = $this->sendAndGetBody(self::createEmail());
+
+        $this->assertArrayNotHasKey('tracking', $body);
+        $this->assertArrayNotHasKey('sensitive', $body);
+    }
+
+    public function testTemplateKeyOfMaximumLengthIsSent()
+    {
+        $email = self::createEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Template-Key', str_repeat('k', 256));
+
+        $this->assertSame(str_repeat('k', 256), $this->sendAndGetBody($email)['template_key']);
     }
 
     public function testTemplateKeyComesFromADefaultHeader()
@@ -372,7 +592,9 @@ class PostHogApiTransportTest extends TestCase
             ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e');
         $email->getHeaders()
             ->addTextHeader('X-PostHog-Template-Key', 'order-shipped')
-            ->addTextHeader('X-PostHog-Capture-Engagement', 'false');
+            ->addTextHeader('X-PostHog-Capture-Engagement', 'false')
+            ->addTextHeader('X-PostHog-Sensitive', 'true')
+            ->add(new TrackingHeader(true, false));
 
         $this->assertSame([
             'to' => 'ana@example.com',
@@ -459,8 +681,12 @@ class PostHogApiTransportTest extends TestCase
         ];
 
         $email = self::createEmail();
-        $email->getHeaders()->add(new TrackingHeader(true, false));
-        yield 'mixed tracking' => [$email, 'mixed_tracking'];
+        $email->getHeaders()->addTextHeader('X-PostHog-Template-Key', str_repeat('k', 257));
+        yield 'template key longer than 256 characters' => [$email, 'invalid_template_key'];
+
+        $email = self::createEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Sensitive', 'yes');
+        yield 'sensitive that is not a boolean' => [$email, 'unsupported_header'];
 
         yield 'explicit body with an AMP part' => [
             self::createEmail()->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'), new TextPart('<!doctype html><html amp4email></html>', 'utf-8', 'x-amp-html'))),
@@ -482,11 +708,27 @@ class PostHogApiTransportTest extends TestCase
             'unsupported_part',
         ];
 
-        $email = self::createEmail();
-        $email->getHeaders()
-            ->add(new TrackingHeader(true, false))
-            ->addTextHeader('X-PostHog-Capture-Engagement', 'true');
-        yield 'mixed tracking with a capture engagement header' => [$email, 'mixed_tracking'];
+        yield 'second tracking header' => [self::createEmail(['X-Track' => 'opens=true', 'x-track' => 'clicks=false']), 'unsupported_header'];
+
+        yield 'tracking flag that is not true, false or default' => [self::createEmail(['X-Track' => 'opens=yes']), 'unsupported_header'];
+
+        yield 'unknown tracking flag' => [self::createEmail(['X-Track' => 'open=false']), 'unsupported_header'];
+
+        yield 'tracking part without a value' => [self::createEmail(['X-Track' => 'opens']), 'unsupported_header'];
+
+        yield 'top-level content header' => [self::createEmail(['Content-Language' => 'de']), 'unsupported_header'];
+
+        yield 'explicit body without the HTML of the email' => [
+            self::createEmail()->setBody(new TextPart('On its way.')),
+            'unsupported_part',
+        ];
+
+        yield 'explicit body without an attachment of the email' => [
+            self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf')->setBody(new AlternativePart(new TextPart('On its way.'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
+
+        yield 'text in a charset that cannot be converted' => [self::createEmail()->text('On its way.', 'x-unknown-charset'), 'unsupported_part'];
 
         yield 'priority other than normal' => [self::createEmail()->priority(Email::PRIORITY_HIGH), 'unsupported_priority'];
 
@@ -526,8 +768,12 @@ class PostHogApiTransportTest extends TestCase
         yield 'template with a capture engagement that is not a boolean' => [$email, 'unsupported_header'];
 
         $email = self::createTemplateEmail();
-        $email->getHeaders()->add(new TrackingHeader(true, false));
-        yield 'template with mixed tracking' => [$email, 'mixed_tracking'];
+        $email->getHeaders()->addTextHeader('X-Track', 'opens=yes');
+        yield 'template with a tracking flag that is not true, false or default' => [$email, 'unsupported_header'];
+
+        $email = self::createTemplateEmail();
+        $email->getHeaders()->addTextHeader('X-PostHog-Sensitive', 'yes');
+        yield 'template with a sensitive that is not a boolean' => [$email, 'unsupported_header'];
     }
 
     #[DataProvider('getErrorResponses')]
@@ -547,6 +793,12 @@ class PostHogApiTransportTest extends TestCase
 
     public static function getErrorResponses(): iterable
     {
+        yield 'clicks without opens' => [
+            self::createErrorResponse(400, 'clicks_need_opens', 'Click tracking needs open tracking. Turn on `opens`, or turn off `clicks`.', 'tracking'),
+            'Unable to send an email: Click tracking needs open tracking. Turn on `opens`, or turn off `clicks`. [clicks_need_opens, field "tracking"] (code 400).',
+            400,
+        ];
+
         yield 'invalid request' => [
             self::createErrorResponse(400, 'invalid_input', 'Enter a valid email address.', 'to'),
             'Unable to send an email: Enter a valid email address. [invalid_input, field "to"] (code 400).',
@@ -621,26 +873,54 @@ class PostHogApiTransportTest extends TestCase
 
     private function sendAndGetBody(Email $email): array
     {
-        $body = null;
-        $client = new MockHttpClient(static function (string $method, string $url, array $options) use (&$body): ResponseInterface {
-            $body = json_decode($options['body'], true);
+        $requests = [];
+        (new PostHogApiTransport('KEY', self::createPostHog($requests)))->send($email);
+
+        return json_decode(end($requests)['options']['body'], true);
+    }
+
+    /**
+     * Answers like PostHog: an upload slot for each file it does not have, the file storage, and the send.
+     *
+     * @param string[] $present the SHA-256 of the files PostHog already has
+     */
+    private static function createPostHog(array &$requests, array $present = []): MockHttpClient
+    {
+        return new MockHttpClient(static function (string $method, string $url, array $options) use (&$requests, $present): ResponseInterface {
+            $requests[] = ['method' => $method, 'url' => $url, 'options' => $options];
+
+            if (str_ends_with($url, '/messaging/attachments/uploads/')) {
+                return new JsonMockResponse(['files' => array_map(static fn (array $file): array => \in_array($file['sha256'], $present, true)
+                    ? ['sha256' => $file['sha256'], 'status' => 'present']
+                    : ['sha256' => $file['sha256'], 'status' => 'upload', 'url' => 'https://storage.example.com/'.$file['sha256'], 'method' => 'PUT', 'headers' => ['x-amz-checksum-sha256' => $file['sha256']], 'expires_at' => '2026-11-13T12:00:00Z'],
+                    json_decode($options['body'], true)['files'])]);
+            }
+
+            if (str_starts_with($url, 'https://storage.example.com/')) {
+                return new MockResponse('', ['http_code' => 200]);
+            }
 
             return new JsonMockResponse(['message_id' => 'msg-1234', 'replayed' => false], ['http_code' => 202]);
         });
-
-        (new PostHogApiTransport('KEY', $client))->send($email);
-
-        return $body;
     }
 
-    private static function createEmail(): Email
+    /**
+     * @param array<string, string> $headers text headers added in this order
+     */
+    private static function createEmail(array $headers = []): Email
     {
-        return (new Email())
+        $email = (new Email())
             ->from(new Address('shop@example.com', 'Shop'))
             ->to(new Address('ana@example.com', 'Ana'))
             ->subject('Your order shipped')
             ->html('<p>On its way.</p>')
             ->text('On its way.');
+
+        foreach ($headers as $name => $value) {
+            $email->getHeaders()->addTextHeader($name, $value);
+        }
+
+        return $email;
     }
 
     private static function createNonSeekableStream(string $contents)
