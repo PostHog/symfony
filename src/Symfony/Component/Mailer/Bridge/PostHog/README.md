@@ -25,7 +25,7 @@ where:
 
 PostHog has no SMTP relay, so the bridge only provides an API transport.
 
-The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes when it holds a special character such as a comma.
+The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes.
 
 Attachments are uploaded before the email is sent. The transport asks PostHog which files it does not have yet,
 uploads each of them to the file storage URL that PostHog answers, without the secret key, and then sends the email
@@ -36,11 +36,10 @@ must allow it. A failed upload sends no email.
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 
  * `multiple_to`: no "To" address, or more than one
- * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign`, `Sender` or `Return-Path`, or more than one "From" address
+ * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign`, `Sender`, `Return-Path` or `Content-Language`; more than one "From" address; a second `X-Track` or `X-PostHog-*` header; an `X-Track` header that does not set `opens` and `clicks` to `true`, `false` or `default`; or an `X-PostHog-Sensitive` or `X-PostHog-Capture-Engagement` header that is not `true` or `false`
  * `tags`, `metadata`: a `TagHeader` or a `MetadataHeader`
  * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses
- * `clicks_need_opens`: a `TrackingHeader` that turns clicks on and opens off, because PostHog tracks clicks only when it also tracks opens
- * `unsupported_part`: a body set with `setBody()` that holds more than the text, the HTML and the attachments of the email, such as an AMP part
+ * `unsupported_part`: a body set with `setBody()` that does not hold exactly the text, the HTML and the attachments of the email, such as one with an AMP part or with another text; a part with a header of its own, such as a `Content-Type` parameter; or a body in a charset that cannot be converted to UTF-8
  * `unsupported_priority`: a priority other than normal
  * `inline_without_cid`: an inline part that has no content id and that the HTML does not refer to by its name
  * `invalid_template_key`: an `X-PostHog-Template-Key` header that does not match `[a-zA-Z0-9_-]{1,256}`
@@ -57,7 +56,7 @@ Each email can set these headers. The transport reads them and does not send the
  * `X-PostHog-Capture-Engagement`: `true` or `false`, to capture the engagement events of the email (sent, delivered, opened, clicked, bounced) as events of the person; it defaults to `true`
  * `X-PostHog-Sensitive`: `true` for an email that carries login links, reset tokens or codes; PostHog then keeps its links as they are and keeps its content out of logs; `false` for any other; without it, PostHog uses the setting of the template that matches the template key, and treats the email as sensitive when no template matches
 
-A `TrackingHeader`, or the `mailer.tracking` option, turns the open pixel and the click tracking of PostHog on or off. A flag that is not set keeps the default of PostHog: opens are tracked, and clicks are tracked unless the email is sensitive.
+A `TrackingHeader`, or the `mailer.tracking` option, turns the open pixel and the click tracking of PostHog on or off. A flag that is not set keeps the default of PostHog: opens are tracked, and clicks are tracked unless the email is sensitive. PostHog tracks clicks only together with opens: an email that turns clicks on and opens off is sent as asked, and the API refuses it with the `clicks_need_opens` code (see below).
 
 ```php
 $email = (new Email())
@@ -99,7 +98,7 @@ These failures can be retried with the same `X-PostHog-Idempotency-Key`:
  * `429`, except with the `quota_limited` code: the send was throttled; wait for the `Retry-After` seconds
  * `503`, and a network error: the email may have been sent anyway
 
-Other failures will fail again. When Messenger sends your emails, set `X-PostHog-Idempotency-Key` from a stable value, such as the order id and the name of the email. A retry with another key, or with none, can send the email twice.
+Other failures, such as a `400` with the `clicks_need_opens` code, will fail again. When Messenger sends your emails, set `X-PostHog-Idempotency-Key` from a stable value, such as the order id and the name of the email. A retry with another key, or with none, can send the email twice.
 
 Resources
 ---------

@@ -104,7 +104,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
      * The email then names each file by its SHA-256, so a file that PostHog already has is not uploaded again.
      * The transport does not retry: a failed upload sends no email.
      *
-     * @param array<string, array{body: string, filename: string}> $files keyed by their SHA-256
+     * @param array<string, array{body: string, filename: ?string}> $files keyed by their SHA-256
      */
     private function uploadFiles(array $files, array $headers): void
     {
@@ -150,12 +150,13 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
             try {
                 $statusCode = $upload->getStatusCode();
+                $error = $statusCode < 200 || $statusCode >= 300 ? $upload->getContent(false) : null;
             } catch (TransportExceptionInterface $e) {
                 throw new HttpTransportException($failure.'could not reach the file storage of PostHog.', $upload, 0, $e);
             }
 
-            if ($statusCode < 200 || $statusCode >= 300) {
-                preg_match_all('{<(Code|Message)>([^<]{1,500})</\1>}', $upload->getContent(false), $matches);
+            if (null !== $error) {
+                preg_match_all('{<(Code|Message)>([^<]{1,500})</\1>}', $error, $matches);
 
                 throw new HttpTransportException($failure.($matches[2] ? implode(', ', $matches[2]) : 'the file storage answered').\sprintf(' (code %d).', $statusCode), $upload);
             }
@@ -181,7 +182,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     }
 
     /**
-     * @param array<string, array{body: string, filename: string}> $files the files to upload, keyed by their SHA-256
+     * @param array<string, array{body: string, filename: ?string}> $files the files to upload, keyed by their SHA-256
      */
     private function getPayload(Email $email, Envelope $envelope, array &$files): array
     {
@@ -211,7 +212,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     }
 
     /**
-     * @param array<string, array{body: string, filename: string}> $files
+     * @param array<string, array{body: string, filename: ?string}> $files
      */
     private function getRenderedPayload(Email $email, array $options, array &$files): array
     {
@@ -229,7 +230,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         $payload = [];
 
         if ($from = $email->getFrom()) {
-            $payload['from'] = self::formatSender($from[0]);
+            $payload['from'] = $from[0]->toString();
         }
 
         foreach (['cc' => $email->getCc(), 'bcc' => $email->getBcc(), 'reply_to' => $email->getReplyTo()] as $field => $addresses) {
@@ -282,7 +283,14 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             throw self::refuse('unsupported_header', 'the API takes one "From" address');
         }
 
+        $seen = [];
         foreach ($email->getHeaders()->all() as $name => $header) {
+            if (isset($seen[$name]) && ('x-track' === $name || \in_array($name, self::OPTION_HEADERS, true))) {
+                throw self::refuse('unsupported_header', \sprintf('the email has more than one "%s" header', $header->getName()));
+            }
+
+            $seen[$name] = true;
+
             if ('x-tag' === $name) {
                 throw self::refuse('tags', 'the API does not take tags');
             }
@@ -319,11 +327,35 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
      */
     private function ensureBodyIsSupported(Email $email): void
     {
-        $expected = ['plain' => null !== $email->getTextBody(), 'html' => null !== $email->getHtmlBody()];
-        $attachments = $email->getAttachments();
         $parts = [$email->getBody()];
+        $attachments = $email->getAttachments();
+
+        // the HTML part that Email builds refers to each inline file by its content id instead of its name; a reference
+        // that already is the content id stays, and strtr() matches it first when the content id starts with the name
+        $references = [];
+        foreach ($attachments as $attachment) {
+            if (!$attachment->hasContentId()) {
+                continue;
+            }
+
+            $references['cid:'.$attachment->getContentId()] = 'cid:'.$attachment->getContentId();
+
+            if (null !== $attachment->getName()) {
+                $references['cid:'.$attachment->getName()] ??= 'cid:'.$attachment->getContentId();
+            }
+        }
+
+        $expected = array_filter([
+            'plain' => null === $email->getTextBody() ? null : [$email->getTextBody(), $email->getTextCharset()],
+            'html' => null === $email->getHtmlBody() ? null : [strtr($email->getHtmlBody(), $references), $email->getHtmlCharset()],
+        ]);
 
         while (null !== $part = array_shift($parts)) {
+            // a related part gets its Content-ID header from Mime itself, and the request carries the content id
+            if ($names = array_diff($part->getHeaders()->getNames(), ['content-id'])) {
+                throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part with its own "%s" header, which the API cannot carry', $part->getMediaType(), $part->getMediaSubtype(), reset($names)));
+            }
+
             if ($part instanceof AbstractMultipartPart) {
                 array_push($parts, ...$part->getParts());
             } elseif ($part instanceof DataPart) {
@@ -332,20 +364,26 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
                 }
 
                 unset($attachments[$i]);
-            } elseif ($part instanceof TextPart && ($expected[$part->getMediaSubtype()] ?? false)) {
-                $expected[$part->getMediaSubtype()] = false;
+            } elseif ($part instanceof TextPart && isset($expected[$subtype = $part->getMediaSubtype()])) {
+                [$body, $charset] = $expected[$subtype];
+
+                if ($body !== $part->getBody() || strtolower($charset ?? '') !== strtolower($part->getPreparedHeaders()->getHeaderParameter('Content-Type', 'charset') ?? '')) {
+                    throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that differs from the email, which the API would send instead', $part->getMediaType(), $subtype));
+                }
+
+                unset($expected[$subtype]);
             } else {
                 throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that the API cannot carry', $part->getMediaType(), $part->getMediaSubtype()));
             }
         }
 
-        if ($expected['plain'] || $expected['html'] || $attachments) {
+        if ($expected || $attachments) {
             throw self::refuse('unsupported_part', 'the body does not hold the text, the HTML or an attachment of the email, which the API would send');
         }
     }
 
     /**
-     * @param array<string, array{body: string, filename: string}> $files
+     * @param array<string, array{body: string, filename: ?string}> $files
      */
     private function formatAttachment(DataPart $attachment, ?string $html, array &$files): array
     {
@@ -392,28 +430,19 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     private function getTracking(Headers $headers): ?array
     {
         $flags = ['opens' => null, 'clicks' => null];
-        $tracking = iterator_to_array($headers->all(TrackingHeader::NAME), false);
-
-        if (\count($tracking) > 1) {
-            throw self::refuse('unsupported_header', 'the email has more than one "X-Track" header');
-        }
-
-        if (($tracking[0] ?? null) instanceof TrackingHeader) {
-            $flags = ['opens' => $tracking[0]->getOpens(), 'clicks' => $tracking[0]->getClicks()];
-        } elseif (isset($tracking[0])) {
-            foreach (explode(';', $tracking[0]->getBodyAsString()) as $part) {
-                if ('' === $part = trim($part)) {
-                    continue;
-                }
-
-                [$name, $value] = array_map(trim(...), explode('=', $part, 2)) + [1 => null];
-
-                if (!\array_key_exists($name, $flags) || !\in_array($value, ['true', 'false', 'default'], true)) {
-                    throw self::refuse('unsupported_header', \sprintf('the "X-Track" header sets "opens" and "clicks" to "true", "false" or "default", not "%s"', $part));
-                }
-
-                $flags[$name] = 'default' === $value ? null : 'true' === $value;
+        // a TrackingHeader writes the same text as a header set in mailer.headers, so both are read from it
+        foreach (explode(';', $headers->get(TrackingHeader::NAME)?->getBodyAsString() ?? '') as $part) {
+            if ('' === $part = trim($part)) {
+                continue;
             }
+
+            [$name, $value] = array_map(trim(...), explode('=', $part, 2)) + [1 => null];
+
+            if (!\array_key_exists($name, $flags) || !\in_array($value, ['true', 'false', 'default'], true)) {
+                throw self::refuse('unsupported_header', \sprintf('the "X-Track" header sets "opens" and "clicks" to "true", "false" or "default", not "%s"', $part));
+            }
+
+            $flags[$name] = 'default' === $value ? null : 'true' === $value;
         }
 
         $flags['engagement'] = self::getBooleanHeader($headers, 'X-PostHog-Capture-Engagement');
@@ -470,18 +499,6 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         }
 
         return null;
-    }
-
-    /**
-     * The API parses the sender as an address, so a name with a special character is quoted.
-     */
-    private static function formatSender(Address $from): string
-    {
-        if ('' === $name = $from->getName()) {
-            return $from->getAddress();
-        }
-
-        return (strpbrk($name, '()<>[]:;@\\,."') ? $from->getEncodedName() : $name).' <'.$from->getAddress().'>';
     }
 
     /**
