@@ -389,6 +389,15 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
     }
 
+    public function testContentIdTextHeaderIsReadLikeAnIdHeader()
+    {
+        $logo = new DataPart('image-bytes', 'logo.png', 'image/png');
+        $logo->getHeaders()->addTextHeader('Content-ID', '<logo@shop.example>');
+        $email = self::createEmail()->html('<img src="cid:logo@shop.example">')->addPart($logo);
+
+        $this->assertSame('logo@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id'] ?? null);
+    }
+
     public function testInlinePartWithAContentIdHeaderKeepsIt()
     {
         $logo = (new DataPart('image-bytes', 'logo.png', 'image/png'))->asInline();
