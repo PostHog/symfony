@@ -471,6 +471,7 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('Bearer KEY', self::getHeader($uploads['options'], 'Authorization'));
         $this->assertSame('PUT', $invoice['method']);
         $this->assertNull(self::getHeader($invoice['options'], 'Authorization'));
+        $this->assertNull(self::getHeader($invoice['options'], 'Cookie'));
         $this->assertSame('Bearer KEY', self::getHeader($send['options'], 'Authorization'));
     }
 
@@ -479,6 +480,7 @@ class PostHogApiTransportTest extends TestCase
         yield 'bearer token' => [['auth_bearer' => 'APP-TOKEN']];
         yield 'basic auth' => [['auth_basic' => 'app:secret']];
         yield 'authorization header' => [['headers' => ['Authorization' => 'Bearer APP-TOKEN']]];
+        yield 'session cookie' => [['headers' => ['Cookie' => 'session=APP-SESSION']]];
     }
 
     public function testAttachmentWithoutANameIsNamedAfterItsType()
