@@ -52,7 +52,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
      */
     private const IGNORED_HEADERS = ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'mime-version', 'x-mailer', 'x-priority', 'x-track'];
 
-    private const OPTION_HEADERS = ['x-posthog-distinct-id', 'x-posthog-template-key', 'x-posthog-idempotency-key', 'x-posthog-capture-engagement'];
+    private const OPTION_HEADERS = ['x-posthog-distinct-id', 'x-posthog-template-key', 'x-posthog-idempotency-key', 'x-posthog-capture-engagement', 'x-posthog-sensitive'];
 
     public function __construct(
         #[\SensitiveParameter] private readonly string $key,
@@ -75,34 +75,115 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             'Authorization' => 'Bearer '.$this->key,
             'X-PostHog-Integration' => self::INTEGRATION.'/'.self::getVersion(),
         ];
+
+        $files = [];
+        $payload = $this->getPayload($email, $envelope, $files);
+
+        if ($files) {
+            $this->uploadFiles($files, $headers);
+        }
+
         if (null !== $idempotencyKey = $email->getHeaders()->getHeaderBody('X-PostHog-Idempotency-Key')) {
             $headers['Idempotency-Key'] = $idempotencyKey;
         }
 
         $response = $this->client->request('POST', 'https://'.$this->getEndpoint().'/api/projects/@current/messaging/send/email/', [
             'headers' => $headers,
-            'json' => $this->getPayload($email, $envelope),
+            'json' => $payload,
         ]);
 
-        try {
-            $statusCode = $response->getStatusCode();
-            $result = $response->toArray(false);
-        } catch (DecodingExceptionInterface) {
-            throw new HttpTransportException('Unable to send an email: '.$response->getContent(false).\sprintf(' (code %d).', $response->getStatusCode()), $response);
-        } catch (TransportExceptionInterface $e) {
-            throw new HttpTransportException('Could not reach the remote PostHog server.', $response, 0, $e);
-        }
-
-        if (202 !== $statusCode) {
-            throw new HttpTransportException('Unable to send an email: '.$this->getErrorMessage($result, $response).\sprintf(' (code %d).', $statusCode), $response);
-        }
-
+        $result = $this->getResult($response, 202, 'Unable to send an email');
         $sentMessage->setMessageId($result['message_id']);
 
         return $response;
     }
 
-    private function getPayload(Email $email, Envelope $envelope): array
+    /**
+     * Asks PostHog which files it lacks and uploads each of them to the URL it answers, without the secret key.
+     *
+     * The email then names each file by its SHA-256, so a file that PostHog already has is not uploaded again.
+     * The transport does not retry: a failed upload sends no email.
+     *
+     * @param array<string, array{body: string, filename: string}> $files keyed by their SHA-256
+     */
+    private function uploadFiles(array $files, array $headers): void
+    {
+        $response = $this->client->request('POST', 'https://'.$this->getEndpoint().'/api/projects/@current/messaging/attachments/uploads/', [
+            'headers' => $headers,
+            'json' => ['files' => array_map(static fn (string $sha256, array $file): array => ['sha256' => $sha256, 'size' => \strlen($file['body'])], array_keys($files), $files)],
+        ]);
+
+        $slots = $this->getResult($response, 200, 'Unable to upload the attachments')['files'] ?? null;
+
+        $uploads = [];
+        foreach (array_keys($files) as $i => $sha256) {
+            $slot = $slots[$i] ?? null;
+
+            if (!\is_array($slot) || $sha256 !== ($slot['sha256'] ?? null)) {
+                throw new HttpTransportException('Unable to upload the attachments: PostHog answered without an upload slot for each file.', $response);
+            }
+
+            if ('present' === ($slot['status'] ?? null)) {
+                continue;
+            }
+
+            if ('upload' !== ($slot['status'] ?? null) || !\is_string($slot['url'] ?? null) || !\is_string($slot['method'] ?? 'PUT') || !\is_array($slot['headers'] ?? null)) {
+                throw new HttpTransportException('Unable to upload the attachments: PostHog answered without an upload slot for each file.', $response);
+            }
+
+            // the file storage is not the API host, so a plain HTTP URL would send the file unencrypted
+            if (!str_starts_with(strtolower($slot['url']), 'https://')) {
+                throw new HttpTransportException(\sprintf('Unable to upload the attachment "%s": PostHog named an upload URL that is not https.', $files[$sha256]['filename']), $response);
+            }
+
+            $uploads[$sha256] = $slot;
+        }
+
+        foreach ($uploads as $sha256 => $slot) {
+            $upload = $this->client->request($slot['method'] ?? 'PUT', $slot['url'], [
+                'headers' => $slot['headers'],
+                'body' => $files[$sha256]['body'],
+                'max_redirects' => 0,
+            ]);
+
+            $failure = \sprintf('Unable to upload the attachment "%s": ', $files[$sha256]['filename']);
+
+            try {
+                $statusCode = $upload->getStatusCode();
+            } catch (TransportExceptionInterface $e) {
+                throw new HttpTransportException($failure.'could not reach the file storage of PostHog.', $upload, 0, $e);
+            }
+
+            if ($statusCode < 200 || $statusCode >= 300) {
+                preg_match_all('{<(Code|Message)>([^<]{1,500})</\1>}', $upload->getContent(false), $matches);
+
+                throw new HttpTransportException($failure.($matches[2] ? implode(', ', $matches[2]) : 'the file storage answered').\sprintf(' (code %d).', $statusCode), $upload);
+            }
+        }
+    }
+
+    private function getResult(ResponseInterface $response, int $expectedStatusCode, string $failure): array
+    {
+        try {
+            $statusCode = $response->getStatusCode();
+            $result = $response->toArray(false);
+        } catch (DecodingExceptionInterface) {
+            throw new HttpTransportException($failure.': '.$response->getContent(false).\sprintf(' (code %d).', $response->getStatusCode()), $response);
+        } catch (TransportExceptionInterface $e) {
+            throw new HttpTransportException('Could not reach the remote PostHog server.', $response, 0, $e);
+        }
+
+        if ($expectedStatusCode !== $statusCode) {
+            throw new HttpTransportException($failure.': '.$this->getErrorMessage($result, $response).\sprintf(' (code %d).', $statusCode), $response);
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array<string, array{body: string, filename: string}> $files the files to upload, keyed by their SHA-256
+     */
+    private function getPayload(Email $email, Envelope $envelope, array &$files): array
     {
         $headers = $email->getHeaders();
         $this->ensureHeadersAreSupported($email);
@@ -113,11 +194,14 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
         $this->ensureEnvelopeMatches($email, $envelope);
 
-        $templateKey = $this->getTemplateKey($headers);
-        $captureEngagement = $this->getCaptureEngagement($headers);
+        $options = [
+            'template_key' => $this->getTemplateKey($headers),
+            'tracking' => $this->getTracking($headers),
+            'sensitive' => self::getBooleanHeader($headers, 'X-PostHog-Sensitive'),
+        ];
 
         $template = $email instanceof RemoteTemplateEmail ? $email->getRemoteTemplate() : null;
-        $payload = ['to' => $to[0]->getAddress()] + (null === $template ? $this->getRenderedPayload($email, $templateKey, $captureEngagement) : $this->getTemplatePayload($email, $template));
+        $payload = ['to' => $to[0]->getAddress()] + (null === $template ? $this->getRenderedPayload($email, $options, $files) : $this->getTemplatePayload($email, $template));
 
         if (null !== $distinctId = $headers->getHeaderBody('X-PostHog-Distinct-Id')) {
             $payload['distinct_id'] = $distinctId;
@@ -126,7 +210,10 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         return $payload;
     }
 
-    private function getRenderedPayload(Email $email, string $templateKey, ?bool $captureEngagement): array
+    /**
+     * @param array<string, array{body: string, filename: string}> $files
+     */
+    private function getRenderedPayload(Email $email, array $options, array &$files): array
     {
         // a stream can only be read once, so its contents are kept for the checks and the request
         if (\is_resource($text = $email->getTextBody())) {
@@ -156,29 +243,23 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         }
 
         if (null !== $html = self::bodyToString($email->getHtmlBody())) {
-            $payload['html'] = $html;
+            $payload['html'] = $html = self::toUtf8($html, $email->getHtmlCharset(), 'HTML');
         }
 
         if (null !== $text = self::bodyToString($email->getTextBody())) {
-            $payload['text'] = $text;
+            $payload['text'] = self::toUtf8($text, $email->getTextCharset(), 'text');
         }
 
         foreach ($email->getAttachments() as $attachment) {
-            $payload['attachments'][] = $this->formatAttachment($attachment, $html);
+            $payload['attachments'][] = $this->formatAttachment($attachment, $html, $files);
         }
 
-        $payload['template_key'] = $templateKey;
-
-        if (null !== $captureEngagement) {
-            $payload['capture_engagement'] = $captureEngagement;
-        }
-
-        return $payload;
+        return $payload + array_filter($options, static fn (mixed $option): bool => null !== $option);
     }
 
     /**
      * The template sets the sender, so the "From" address that Symfony requires only builds the envelope.
-     * The template key and the engagement capture belong to the rendered form, so they are not sent.
+     * The template key, the tracking and the sensitivity belong to the rendered form, so they are not sent: the template has its own.
      */
     private function getTemplatePayload(Email $email, RemoteTemplate $template): array
     {
@@ -214,7 +295,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
                 throw self::refuse('unsupported_priority', 'the API sends every email with the normal priority');
             }
 
-            if (!\in_array($name, self::IGNORED_HEADERS, true) && !\in_array($name, self::OPTION_HEADERS, true) && !str_starts_with($name, 'content-')) {
+            if (!\in_array($name, self::IGNORED_HEADERS, true) && !\in_array($name, self::OPTION_HEADERS, true)) {
                 throw self::refuse('unsupported_header', \sprintf('the API does not take the "%s" header', $header->getName()));
             }
         }
@@ -234,35 +315,47 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     }
 
     /**
-     * The request carries the text, the HTML and the attachments of the email, so a body set with setBody() can only hold those.
+     * The request carries the text, the HTML and the attachments of the email, so a body set with setBody() must hold exactly those.
      */
     private function ensureBodyIsSupported(Email $email): void
     {
         $expected = ['plain' => null !== $email->getTextBody(), 'html' => null !== $email->getHtmlBody()];
+        $attachments = $email->getAttachments();
         $parts = [$email->getBody()];
 
         while (null !== $part = array_shift($parts)) {
             if ($part instanceof AbstractMultipartPart) {
                 array_push($parts, ...$part->getParts());
             } elseif ($part instanceof DataPart) {
-                if (!\in_array($part, $email->getAttachments(), true)) {
+                if (false === $i = array_search($part, $attachments, true)) {
                     throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that is not an attachment of the email', $part->getMediaType(), $part->getMediaSubtype()));
                 }
+
+                unset($attachments[$i]);
             } elseif ($part instanceof TextPart && ($expected[$part->getMediaSubtype()] ?? false)) {
                 $expected[$part->getMediaSubtype()] = false;
             } else {
                 throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that the API cannot carry', $part->getMediaType(), $part->getMediaSubtype()));
             }
         }
+
+        if ($expected['plain'] || $expected['html'] || $attachments) {
+            throw self::refuse('unsupported_part', 'the body does not hold the text, the HTML or an attachment of the email, which the API would send');
+        }
     }
 
-    private function formatAttachment(DataPart $attachment, ?string $html): array
+    /**
+     * @param array<string, array{body: string, filename: string}> $files
+     */
+    private function formatAttachment(DataPart $attachment, ?string $html, array &$files): array
     {
+        $body = $attachment->getBody();
         $formatted = [
+            'sha256' => $sha256 = hash('sha256', $body),
             'filename' => $attachment->getFilename() ?? $attachment->getName(),
             'content_type' => $attachment->getContentType(),
-            'content' => base64_encode($attachment->getBody()),
         ];
+        $files[$sha256] ??= ['body' => $body, 'filename' => $formatted['filename']];
 
         if (null !== $reference = null === $html ? null : self::getReferencedContentId($attachment, $html)) {
             $formatted['content_id'] = $reference;
@@ -283,30 +376,59 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             return self::INTEGRATION;
         }
 
-        if (!preg_match('/^[a-zA-Z0-9_-]{1,400}$/', $key)) {
-            throw self::refuse('invalid_template_key', 'the "X-PostHog-Template-Key" header must match [a-zA-Z0-9_-]{1,400}');
+        if (!preg_match('/^[a-zA-Z0-9_-]{1,256}$/', $key)) {
+            throw self::refuse('invalid_template_key', 'the "X-PostHog-Template-Key" header must match [a-zA-Z0-9_-]{1,256}');
         }
 
         return $key;
     }
 
-    private function getCaptureEngagement(Headers $headers): ?bool
+    /**
+     * Maps the "X-Track" header onto the tracking of PostHog, and X-PostHog-Capture-Engagement onto its engagement events.
+     *
+     * A flag that is not set keeps the default of PostHog, and PostHog checks the flags against each other.
+     * A header that cannot be read is refused rather than dropped. The deprecated "capture_engagement" field is never sent.
+     */
+    private function getTracking(Headers $headers): ?array
     {
-        $tracking = TrackingHeader::fromHeaders($headers);
+        $flags = ['opens' => null, 'clicks' => null];
+        $tracking = iterator_to_array($headers->all(TrackingHeader::NAME), false);
 
-        if (null !== $tracking && $tracking->getOpens() !== $tracking->getClicks()) {
-            throw self::refuse('mixed_tracking', 'the API tracks opens and clicks together');
+        if (\count($tracking) > 1) {
+            throw self::refuse('unsupported_header', 'the email has more than one "X-Track" header');
         }
 
-        if (null !== $value = $headers->getHeaderBody('X-PostHog-Capture-Engagement')) {
-            return match ($value) {
-                'true' => true,
-                'false' => false,
-                default => throw self::refuse('unsupported_header', 'the "X-PostHog-Capture-Engagement" header must be "true" or "false"'),
-            };
+        if (($tracking[0] ?? null) instanceof TrackingHeader) {
+            $flags = ['opens' => $tracking[0]->getOpens(), 'clicks' => $tracking[0]->getClicks()];
+        } elseif (isset($tracking[0])) {
+            foreach (explode(';', $tracking[0]->getBodyAsString()) as $part) {
+                if ('' === $part = trim($part)) {
+                    continue;
+                }
+
+                [$name, $value] = array_map(trim(...), explode('=', $part, 2)) + [1 => null];
+
+                if (!\array_key_exists($name, $flags) || !\in_array($value, ['true', 'false', 'default'], true)) {
+                    throw self::refuse('unsupported_header', \sprintf('the "X-Track" header sets "opens" and "clicks" to "true", "false" or "default", not "%s"', $part));
+                }
+
+                $flags[$name] = 'default' === $value ? null : 'true' === $value;
+            }
         }
 
-        return $tracking?->getOpens();
+        $flags['engagement'] = self::getBooleanHeader($headers, 'X-PostHog-Capture-Engagement');
+
+        return array_filter($flags, static fn (?bool $flag): bool => null !== $flag) ?: null;
+    }
+
+    private static function getBooleanHeader(Headers $headers, string $name): ?bool
+    {
+        return match ($headers->getHeaderBody($name)) {
+            null => null,
+            'true' => true,
+            'false' => false,
+            default => throw self::refuse('unsupported_header', \sprintf('the "%s" header must be "true" or "false"', $name)),
+        };
     }
 
     private function getErrorMessage(array $result, ResponseInterface $response): string
@@ -360,6 +482,28 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         }
 
         return (strpbrk($name, '()<>[]:;@\\,."') ? $from->getEncodedName() : $name).' <'.$from->getAddress().'>';
+    }
+
+    /**
+     * The request is JSON, so a body in another charset is converted to UTF-8.
+     */
+    private static function toUtf8(string $body, ?string $charset, string $name): string
+    {
+        if (null === $charset || 'utf-8' === strtolower($charset)) {
+            return $body;
+        }
+
+        try {
+            $converted = mb_convert_encoding($body, 'UTF-8', $charset);
+        } catch (\ValueError) {
+            $converted = false;
+        }
+
+        if (false === $converted) {
+            throw self::refuse('unsupported_part', \sprintf('the %s body uses the "%s" charset, which cannot be converted to UTF-8', $name, $charset));
+        }
+
+        return $converted;
     }
 
     /**

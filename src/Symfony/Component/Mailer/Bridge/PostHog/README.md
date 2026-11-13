@@ -27,17 +27,23 @@ PostHog has no SMTP relay, so the bridge only provides an API transport.
 
 The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes when it holds a special character such as a comma.
 
+Attachments are uploaded before the email is sent. The transport asks PostHog which files it does not have yet,
+uploads each of them to the file storage URL that PostHog answers, without the secret key, and then sends the email
+naming each file by its SHA-256. A file that PostHog already has is not uploaded again, and the same file attached
+twice is uploaded once. The file storage is not on the host of the DSN, so a network that limits outgoing requests
+must allow it. A failed upload sends no email.
+
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 
  * `multiple_to`: no "To" address, or more than one
  * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign`, `Sender` or `Return-Path`, or more than one "From" address
  * `tags`, `metadata`: a `TagHeader` or a `MetadataHeader`
  * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses
- * `mixed_tracking`: a `TrackingHeader` with different values for opens and clicks
+ * `clicks_need_opens`: a `TrackingHeader` that turns clicks on and opens off, because PostHog tracks clicks only when it also tracks opens
  * `unsupported_part`: a body set with `setBody()` that holds more than the text, the HTML and the attachments of the email, such as an AMP part
  * `unsupported_priority`: a priority other than normal
  * `inline_without_cid`: an inline part that has no content id and that the HTML does not refer to by its name
- * `invalid_template_key`: an `X-PostHog-Template-Key` header that does not match `[a-zA-Z0-9_-]{1,400}`
+ * `invalid_template_key`: an `X-PostHog-Template-Key` header that does not match `[a-zA-Z0-9_-]{1,256}`
  * `template_with_content`: a remote template with a subject, copies, reply-to addresses or attachments
 
 PostHog options
@@ -48,7 +54,10 @@ Each email can set these headers. The transport reads them and does not send the
  * `X-PostHog-Distinct-Id`: the person the send is attributed to; PostHog uses the "To" address when it is not set
  * `X-PostHog-Template-Key`: the key PostHog groups the sends by in its reports; it defaults to `symfony-mailer`
  * `X-PostHog-Idempotency-Key`: sent as the `Idempotency-Key` header of the request
- * `X-PostHog-Capture-Engagement`: `true` or `false`, to capture opens and clicks; a `TrackingHeader` with the same value for opens and clicks does the same
+ * `X-PostHog-Capture-Engagement`: `true` or `false`, to capture the engagement events of the email (sent, delivered, opened, clicked, bounced) as events of the person; it defaults to `true`
+ * `X-PostHog-Sensitive`: `true` for an email that carries login links, reset tokens or codes; PostHog then keeps its links as they are and keeps its content out of logs; `false` for any other; without it, PostHog uses the setting of the template that matches the template key, and treats the email as sensitive when no template matches
+
+A `TrackingHeader`, or the `mailer.tracking` option, turns the open pixel and the click tracking of PostHog on or off. A flag that is not set keeps the default of PostHog: opens are tracked, and clicks are tracked unless the email is sensitive.
 
 ```php
 $email = (new Email())
@@ -77,12 +86,12 @@ $email = (new RemoteTemplateEmail())
     ->template('0190f0c2-7d1e-7a3b-9c2e-5f1a2b3c4d5e', ['order' => '981']);
 ```
 
-The template sets the sender, the subject and the bodies. The "From" address is still needed by Symfony to build the envelope, but it is not sent. The `X-PostHog-Template-Key` and `X-PostHog-Capture-Engagement` headers are checked as on any email, but they are not sent, because a template send does not take them.
+The template sets the sender, the subject and the bodies. The "From" address is still needed by Symfony to build the envelope, but it is not sent. The `X-PostHog-Template-Key`, `X-PostHog-Capture-Engagement` and `X-PostHog-Sensitive` headers and the `TrackingHeader` are checked as on any email, but they are not sent, because a template send does not take them: the template has its own settings.
 
 Errors and retries
 ------------------
 
-A failed send throws an `HttpTransportException`. Its message holds the error detail of the API, its code and the field it is about. Its response holds the status code and, for a throttled send, the `Retry-After` header. The transport does not retry by itself.
+A failed send, or a failed upload of an attachment, throws an `HttpTransportException`. Its message holds the error detail of the API, its code and the field it is about, or the answer of the file storage. Its response holds the status code and, for a throttled send, the `Retry-After` header. The transport does not retry by itself.
 
 These failures can be retried with the same `X-PostHog-Idempotency-Key`:
 
