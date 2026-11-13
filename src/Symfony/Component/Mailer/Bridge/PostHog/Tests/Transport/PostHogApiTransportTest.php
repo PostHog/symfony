@@ -444,6 +444,43 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo', $body['attachments'][0]['content_id']);
     }
 
+    public function testBodyThatEmailBuiltKeepsAReferenceToTheNameOfAPartWithItsOwnContentId()
+    {
+        $html = '<img src="cid:logo"><div style="background: url(cid:badge)">Paid</div>';
+        $email = self::createEmail()
+            ->html($html)
+            ->embed('logo-bytes', 'logo', 'image/png')
+            ->addPart((new DataPart('badge-bytes', 'badge', 'image/png'))->asInline()->setContentId('badge@shop.example'));
+        $email->setBody($email->getBody());
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame($html, $body['html']);
+        $this->assertSame(['logo', 'badge'], array_column($body['attachments'], 'content_id'));
+    }
+
+    #[DataProvider('getClientCredentials')]
+    public function testUploadSendsNoCredentialOfTheClient(array $defaultOptions)
+    {
+        $requests = [];
+        $client = self::createPostHog($requests)->withOptions($defaultOptions);
+        (new PostHogApiTransport('KEY', $client))->send(self::createEmail()->attach('%PDF-1.4', 'invoice.pdf', 'application/pdf'));
+
+        [$uploads, $invoice, $send] = $requests;
+
+        $this->assertSame('Bearer KEY', self::getHeader($uploads['options'], 'Authorization'));
+        $this->assertSame('PUT', $invoice['method']);
+        $this->assertNull(self::getHeader($invoice['options'], 'Authorization'));
+        $this->assertSame('Bearer KEY', self::getHeader($send['options'], 'Authorization'));
+    }
+
+    public static function getClientCredentials(): iterable
+    {
+        yield 'bearer token' => [['auth_bearer' => 'APP-TOKEN']];
+        yield 'basic auth' => [['auth_basic' => 'app:secret']];
+        yield 'authorization header' => [['headers' => ['Authorization' => 'Bearer APP-TOKEN']]];
+    }
+
     public function testAttachmentWithoutANameIsNamedAfterItsType()
     {
         $email = self::createEmail()
