@@ -414,6 +414,20 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('<p>On its way.</p>', $body['html']);
     }
 
+    public function testExplicitBodyLeavesTheAttachmentsOfTheEmailAsTheyAre()
+    {
+        $html = '<img src="cid:logo@shop.example">';
+        $logo = (new DataPart('image-bytes', null, 'image/png'))->setContentId('logo@shop.example');
+        $email = self::createEmail()
+            ->html($html)
+            ->addPart($logo)
+            ->setBody(new MixedPart(new AlternativePart(new TextPart('On its way.'), new TextPart($html, 'utf-8', 'html')), $logo));
+
+        $this->assertSame('logo@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+        $this->assertNull($logo->getName());
+        $this->assertSame('attachment', $logo->getDisposition());
+    }
+
     public function testSendPostHogOptions()
     {
         $email = self::createEmail();

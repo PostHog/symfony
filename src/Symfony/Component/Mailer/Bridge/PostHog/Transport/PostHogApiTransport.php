@@ -54,6 +54,11 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
     private const OPTION_HEADERS = ['x-posthog-distinct-id', 'x-posthog-template-key', 'x-posthog-idempotency-key', 'x-posthog-capture-engagement', 'x-posthog-sensitive'];
 
+    /**
+     * Part headers that Mime writes itself, such as the Content-ID of a related part, which the request carries as content_id.
+     */
+    private const HEADERS_MIME_WRITES = ['content-id'];
+
     public function __construct(
         #[\SensitiveParameter] private readonly string $key,
         ?HttpClientInterface $client = null,
@@ -329,30 +334,10 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     {
         $parts = [$email->getBody()];
         $attachments = $email->getAttachments();
-
-        // the HTML part that Email builds refers to each inline file by its content id instead of its name; a reference
-        // that already is the content id stays, and strtr() matches it first when the content id starts with the name
-        $references = [];
-        foreach ($attachments as $attachment) {
-            if (!$attachment->hasContentId()) {
-                continue;
-            }
-
-            $references['cid:'.$attachment->getContentId()] = 'cid:'.$attachment->getContentId();
-
-            if (null !== $attachment->getName()) {
-                $references['cid:'.$attachment->getName()] ??= 'cid:'.$attachment->getContentId();
-            }
-        }
-
-        $expected = array_filter([
-            'plain' => null === $email->getTextBody() ? null : [$email->getTextBody(), $email->getTextCharset()],
-            'html' => null === $email->getHtmlBody() ? null : [strtr($email->getHtmlBody(), $references), $email->getHtmlCharset()],
-        ]);
+        $expected = self::getBuiltTextParts($email);
 
         while (null !== $part = array_shift($parts)) {
-            // a related part gets its Content-ID header from Mime itself, and the request carries the content id
-            if ($names = array_diff($part->getHeaders()->getNames(), ['content-id'])) {
+            if ($names = array_diff($part->getHeaders()->getNames(), self::HEADERS_MIME_WRITES)) {
                 throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part with its own "%s" header, which the API cannot carry', $part->getMediaType(), $part->getMediaSubtype(), reset($names)));
             }
 
@@ -365,9 +350,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
                 unset($attachments[$i]);
             } elseif ($part instanceof TextPart && isset($expected[$subtype = $part->getMediaSubtype()])) {
-                [$body, $charset] = $expected[$subtype];
-
-                if ($body !== $part->getBody() || strtolower($charset ?? '') !== strtolower($part->getPreparedHeaders()->getHeaderParameter('Content-Type', 'charset') ?? '')) {
+                if (!self::hasSameText($part, $expected[$subtype])) {
                     throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that differs from the email, which the API would send instead', $part->getMediaType(), $subtype));
                 }
 
@@ -380,6 +363,46 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         if ($expected || $attachments) {
             throw self::refuse('unsupported_part', 'the body does not hold the text, the HTML or an attachment of the email, which the API would send');
         }
+    }
+
+    /**
+     * Lets Email build the text and HTML parts it would build for this email, so that Email alone decides which references
+     * to inline files it rewrites to their content ids. The attachments are cloned, as building the body renames and inlines them.
+     *
+     * @return array<string, TextPart>
+     */
+    private static function getBuiltTextParts(Email $email): array
+    {
+        if (null === $email->getTextBody() && null === $email->getHtmlBody()) {
+            return [];
+        }
+
+        $built = (new Email())
+            ->text($email->getTextBody(), $email->getTextCharset() ?? 'utf-8')
+            ->html($email->getHtmlBody(), $email->getHtmlCharset() ?? 'utf-8');
+
+        foreach ($email->getAttachments() as $attachment) {
+            $built->addPart(clone $attachment);
+        }
+
+        $textParts = [];
+        $parts = [$built->getBody()];
+
+        while (null !== $part = array_shift($parts)) {
+            if ($part instanceof AbstractMultipartPart) {
+                array_push($parts, ...$part->getParts());
+            } elseif ($part instanceof TextPart && !$part instanceof DataPart) {
+                $textParts[$part->getMediaSubtype()] = $part;
+            }
+        }
+
+        return $textParts;
+    }
+
+    private static function hasSameText(TextPart $part, TextPart $built): bool
+    {
+        return $part->getBody() === $built->getBody()
+            && 0 === strcasecmp($part->getPreparedHeaders()->get('Content-Type')->getBodyAsString(), $built->getPreparedHeaders()->get('Content-Type')->getBodyAsString());
     }
 
     /**
@@ -426,11 +449,12 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
      *
      * A flag that is not set keeps the default of PostHog, and PostHog checks the flags against each other.
      * A header that cannot be read is refused rather than dropped. The deprecated "capture_engagement" field is never sent.
+     * A TrackingHeader writes the same text as a plain header set in mailer.headers, so both are read from their text.
      */
     private function getTracking(Headers $headers): ?array
     {
         $flags = ['opens' => null, 'clicks' => null];
-        // a TrackingHeader writes the same text as a header set in mailer.headers, so both are read from it
+
         foreach (explode(';', $headers->get(TrackingHeader::NAME)?->getBodyAsString() ?? '') as $part) {
             if ('' === $part = trim($part)) {
                 continue;
