@@ -36,10 +36,10 @@ must allow it. A failed upload sends no email.
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 
  * `multiple_to`: no "To" address, or more than one
- * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign`, `Sender`, `Return-Path` or `Content-Language`; more than one "From" address; a second `X-Track` or `X-PostHog-*` header; an `X-Track` header that does not set `opens` and `clicks` to `true`, `false` or `default`; or an `X-PostHog-Sensitive` or `X-PostHog-Capture-Engagement` header that is not `true` or `false`
+ * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign` or `Content-Language`; more than one "From" address; a second `X-Track` or `X-PostHog-*` header; an `X-Track` header that does not set `opens` and `clicks` to `true`, `false` or `default`; or an `X-PostHog-Sensitive` or `X-PostHog-Capture-Engagement` header that is not `true` or `false`
  * `tags`, `metadata`: a `TagHeader` or a `MetadataHeader`
- * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses
- * `unsupported_part`: a body set with `setBody()` that does not hold exactly the text, the HTML and the attachments of the email, such as one with an AMP part or with another text; a part with a header of its own, such as a `Content-Type` parameter; or a body in a charset that cannot be converted to UTF-8
+ * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses; or a `Sender` or `Return-Path` header other than the "From" address, as the API sends from that address
+ * `unsupported_part`: a body set with `setBody()` that does not hold exactly the text, the HTML and the attachments of the email, such as one with an AMP part, with another text or with the text shown as an attachment; a part with a header of its own, such as a `Content-Type` parameter; an inline part that the HTML refers to both by its name and by its content id; or a body in a charset that cannot be converted to UTF-8
  * `unsupported_priority`: a priority other than normal
  * `inline_without_cid`: an inline part that has no content id and that the HTML does not refer to by its name
  * `invalid_template_key`: an `X-PostHog-Template-Key` header that does not match `[a-zA-Z0-9_-]{1,256}`

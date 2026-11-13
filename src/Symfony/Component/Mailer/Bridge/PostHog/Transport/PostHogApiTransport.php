@@ -50,7 +50,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     /**
      * Headers that the payload already carries or that the API writes itself.
      */
-    private const IGNORED_HEADERS = ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'mime-version', 'x-mailer', 'x-priority', 'x-track'];
+    private const IGNORED_HEADERS = ['from', 'to', 'cc', 'bcc', 'reply-to', 'subject', 'date', 'message-id', 'mime-version', 'x-mailer', 'x-priority', 'x-track', 'sender', 'return-path'];
 
     private const OPTION_HEADERS = ['x-posthog-distinct-id', 'x-posthog-template-key', 'x-posthog-idempotency-key', 'x-posthog-capture-engagement', 'x-posthog-sensitive'];
 
@@ -322,8 +322,16 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         sort($expected);
         sort($actual);
 
-        if ($envelope->getSender()->getAddress() !== ($email->getFrom()[0] ?? null)?->getAddress() || $expected !== $actual) {
+        $from = ($email->getFrom()[0] ?? null)?->getAddress();
+
+        if ($envelope->getSender()->getAddress() !== $from || $expected !== $actual) {
             throw self::refuse('envelope_mismatch', 'the API sends to the recipients of the email, from its sender');
+        }
+
+        foreach (['Sender' => $email->getSender(), 'Return-Path' => $email->getReturnPath()] as $name => $address) {
+            if (null !== $address && $address->getAddress() !== $from) {
+                throw self::refuse('envelope_mismatch', \sprintf('the API sends from the "From" address, not from another "%s" address', $name));
+            }
         }
     }
 
@@ -350,6 +358,10 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
                 unset($attachments[$i]);
             } elseif ($part instanceof TextPart && isset($expected[$subtype = $part->getMediaSubtype()])) {
+                if (!\in_array($part->getDisposition(), [null, 'inline'], true)) {
+                    throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part shown as an attachment, which the API would send as the body', $part->getMediaType(), $subtype));
+                }
+
                 if (!self::hasSameText($part, $expected[$subtype], 'html' === $subtype ? $email->getHtmlBody() : $email->getTextBody())) {
                     throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that differs from the email, which the API would send instead', $part->getMediaType(), $subtype));
                 }
@@ -520,13 +532,14 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         preg_match_all('/(["\'])cid:(.*?)\1|(?<!["\'])\bcid:([^\s"\'>)]+)/i', $html, $matches, \PREG_SET_ORDER);
         $references = array_map(static fn (array $match): string => $match[3] ?? $match[2], $matches);
 
-        foreach ([$part->getName(), $part->hasContentId() ? $part->getContentId() : null] as $reference) {
-            if (null !== $reference && \in_array($reference, $references, true)) {
-                return $reference;
-            }
+        $byName = null !== $part->getName() && \in_array($part->getName(), $references, true);
+        $byContentId = $part->hasContentId() && $part->getContentId() !== $part->getName() && \in_array($part->getContentId(), $references, true);
+
+        if ($byName && $byContentId) {
+            throw self::refuse('unsupported_part', \sprintf('the HTML refers to the inline part "%s" by its name and by its content id, and the API takes one of them', $part->getName()));
         }
 
-        return null;
+        return $byName ? $part->getName() : ($byContentId ? $part->getContentId() : null);
     }
 
     /**
