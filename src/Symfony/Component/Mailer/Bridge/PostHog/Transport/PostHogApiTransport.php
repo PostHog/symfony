@@ -26,6 +26,8 @@ use Symfony\Component\Mailer\Transport\RemoteTemplateTransportInterface;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Header\Headers;
+use Symfony\Component\Mime\Header\IdentificationHeader;
+use Symfony\Component\Mime\MimeTypes;
 use Symfony\Component\Mime\Part\AbstractMultipartPart;
 use Symfony\Component\Mime\Part\DataPart;
 use Symfony\Component\Mime\Part\TextPart;
@@ -235,7 +237,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         $payload = [];
 
         if ($from = $email->getFrom()) {
-            $payload['from'] = $from[0]->toString();
+            $payload['from'] = self::formatSender($from[0]);
         }
 
         foreach (['cc' => $email->getCc(), 'bcc' => $email->getBcc(), 'reply_to' => $email->getReplyTo()] as $field => $addresses) {
@@ -328,9 +330,9 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
             throw self::refuse('envelope_mismatch', 'the API sends to the recipients of the email, from its sender');
         }
 
-        foreach (['Sender' => $email->getSender(), 'Return-Path' => $email->getReturnPath()] as $name => $address) {
-            if (null !== $address && $address->getAddress() !== $from) {
-                throw self::refuse('envelope_mismatch', \sprintf('the API sends from the "From" address, not from another "%s" address', $name));
+        foreach ([...$email->getHeaders()->all('sender'), ...$email->getHeaders()->all('return-path')] as $header) {
+            if ($header->getBody()->getAddress() !== $from) {
+                throw self::refuse('envelope_mismatch', \sprintf('the API sends from the "From" address, not from another "%s" address', $header->getName()));
             }
         }
     }
@@ -429,7 +431,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         $body = $attachment->getBody();
         $formatted = [
             'sha256' => $sha256 = hash('sha256', $body),
-            'filename' => $attachment->getFilename() ?? $attachment->getName(),
+            'filename' => $attachment->getFilename() ?? $attachment->getName() ?? self::nameAfterType($attachment->getContentType()),
             'content_type' => $attachment->getContentType(),
         ];
         $files[$sha256] ??= ['body' => $body, 'filename' => $formatted['filename']];
@@ -437,11 +439,11 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         if (null !== $reference = null === $html ? null : self::getReferencedContentId($attachment, $html)) {
             $formatted['content_id'] = $reference;
         } elseif ('inline' === $attachment->getDisposition()) {
-            if (!$attachment->hasContentId()) {
+            if (null === $contentId = self::getOwnContentId($attachment)) {
                 throw self::refuse('inline_without_cid', \sprintf('the inline part "%s" has no content id and the HTML does not refer to it', $attachment->getName()));
             }
 
-            $formatted['content_id'] = $attachment->getContentId();
+            $formatted['content_id'] = $contentId;
         }
 
         return $formatted;
@@ -533,13 +535,52 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         $references = array_map(static fn (array $match): string => $match[3] ?? $match[2], $matches);
 
         $byName = null !== $part->getName() && \in_array($part->getName(), $references, true);
-        $byContentId = $part->hasContentId() && $part->getContentId() !== $part->getName() && \in_array($part->getContentId(), $references, true);
+        $contentId = self::getOwnContentId($part);
+        $byContentId = null !== $contentId && $contentId !== $part->getName() && \in_array($contentId, $references, true);
 
         if ($byName && $byContentId) {
             throw self::refuse('unsupported_part', \sprintf('the HTML refers to the inline part "%s" by its name and by its content id, and the API takes one of them', $part->getName()));
         }
 
-        return $byName ? $part->getName() : ($byContentId ? $part->getContentId() : null);
+        return $byName ? $part->getName() : ($byContentId ? $contentId : null);
+    }
+
+    /**
+     * The content id set with setContentId() or as a Content-ID header of the part.
+     */
+    private static function getOwnContentId(DataPart $part): ?string
+    {
+        if ($part->hasContentId()) {
+            return $part->getContentId();
+        }
+
+        if (null === $header = $part->getHeaders()->get('Content-ID')) {
+            return null;
+        }
+
+        return $header instanceof IdentificationHeader ? $header->getId() : trim($header->getBodyAsString(), '<> ');
+    }
+
+    /**
+     * The API needs a file name, so an unnamed attachment is named after its type, such as "attachment.pdf".
+     */
+    private static function nameAfterType(string $contentType): string
+    {
+        $extension = MimeTypes::getDefault()->getExtensions($contentType)[0] ?? null;
+
+        return null === $extension ? 'attachment' : 'attachment.'.$extension;
+    }
+
+    /**
+     * Keeps the display name of the sender, in quotes only when it holds a character that RFC 5322 reserves, such as a comma.
+     */
+    private static function formatSender(Address $address): string
+    {
+        if ('' === $name = $address->getName()) {
+            return $address->getAddress();
+        }
+
+        return (false === strpbrk($name, '()<>[]:;@\\,."') ? $name : $address->getEncodedName()).' <'.$address->getAddress().'>';
     }
 
     /**

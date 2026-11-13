@@ -25,7 +25,7 @@ where:
 
 PostHog has no SMTP relay, so the bridge only provides an API transport.
 
-The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes.
+The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes when it holds a character such as a comma or a dot. An inline part is referred to by its name or by its content id, set with `setContentId()` or as a `Content-ID` header, and an attachment without a name is named after its type, such as `attachment.pdf`.
 
 Attachments are uploaded before the email is sent. The transport asks PostHog which files it does not have yet,
 uploads each of them to the file storage URL that PostHog answers, without the secret key, and then sends the email
