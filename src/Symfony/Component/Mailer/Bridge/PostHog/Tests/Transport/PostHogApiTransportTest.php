@@ -70,7 +70,7 @@ class PostHogApiTransportTest extends TestCase
 
             $this->assertEquals([
                 'to' => 'ana@example.com',
-                'from' => '"Shop" <shop@example.com>',
+                'from' => 'Shop <shop@example.com>',
                 'subject' => 'Your order shipped',
                 'html' => '<p>On its way.</p>',
                 'text' => 'On its way.',
@@ -94,7 +94,7 @@ class PostHogApiTransportTest extends TestCase
         $body = $this->sendAndGetBody($email);
 
         $this->assertSame('ana@example.com', $body['to']);
-        $this->assertSame('"Shop" <shop@example.com>', $body['from']);
+        $this->assertSame('Shop <shop@example.com>', $body['from']);
         $this->assertSame(['bo@example.com'], $body['cc']);
         $this->assertSame(['help@example.com'], $body['reply_to']);
     }
@@ -121,21 +121,21 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('shop@example.com', $this->sendAndGetBody($email)['from']);
     }
 
-    #[DataProvider('getQuotedSenderNames')]
-    public function testSenderNameIsQuoted(string $name, string $expected)
+    #[DataProvider('getSenderNames')]
+    public function testSenderNameIsQuotedOnlyWhenItHoldsAReservedCharacter(string $name, string $expected)
     {
         $email = self::createEmail()->from(new Address('shop@example.com', $name));
 
         $this->assertSame($expected, $this->sendAndGetBody($email)['from']);
     }
 
-    public static function getQuotedSenderNames(): iterable
+    public static function getSenderNames(): iterable
     {
-        yield 'plain' => ['Shop', '"Shop" <shop@example.com>'];
+        yield 'plain' => ['Shop', 'Shop <shop@example.com>'];
         yield 'comma' => ['Shop, Inc', '"Shop, Inc" <shop@example.com>'];
         yield 'quote' => ['Say "hi"', '"Say \\"hi\\"" <shop@example.com>'];
         yield 'dot' => ['Shop Inc.', '"Shop Inc." <shop@example.com>'];
-        yield 'non ascii' => ['Jürgen', '"Jürgen" <shop@example.com>'];
+        yield 'non ascii' => ['Jürgen', 'Jürgen <shop@example.com>'];
     }
 
     public function testSendAttachmentAndInlineImage()
@@ -380,6 +380,48 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo', $body['attachments'][0]['content_id']);
     }
 
+    public function testContentIdHeaderIsTheContentIdOfThePart()
+    {
+        $logo = new DataPart('image-bytes', 'logo.png', 'image/png');
+        $logo->getHeaders()->addIdHeader('Content-ID', 'logo@shop.example');
+        $email = self::createEmail()->html('<img src="cid:logo@shop.example">')->addPart($logo);
+
+        $this->assertSame('logo@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testInlinePartWithAContentIdHeaderKeepsIt()
+    {
+        $logo = (new DataPart('image-bytes', 'logo.png', 'image/png'))->asInline();
+        $logo->getHeaders()->addIdHeader('Content-ID', 'logo@shop.example');
+        $email = self::createEmail()->addPart($logo);
+
+        $this->assertSame('logo@shop.example', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
+    }
+
+    public function testBodyThatEmailBuiltKeepsTheReferencesItDoesNotRewrite()
+    {
+        $html = '<img src="cid:logo"><div style="background: url(cid:logo)">';
+        $email = self::createEmail()->html($html)->embed('image-bytes', 'logo', 'image/png');
+        $email->setBody($email->getBody());
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame($html, $body['html']);
+        $this->assertSame('logo', $body['attachments'][0]['content_id']);
+    }
+
+    public function testAttachmentWithoutANameIsNamedAfterItsType()
+    {
+        $email = self::createEmail()
+            ->addPart(new DataPart('%PDF-1.4', null, 'application/pdf'))
+            ->addPart(new DataPart('bytes', null, 'application/x-unknown-type'));
+
+        $attachments = $this->sendAndGetBody($email)['attachments'];
+
+        $this->assertSame('attachment.pdf', $attachments[0]['filename']);
+        $this->assertSame('attachment', $attachments[1]['filename']);
+    }
+
     public function testAttachmentReferencedByTheHtmlIsSentInline()
     {
         $email = self::createEmail()
@@ -473,7 +515,7 @@ class PostHogApiTransportTest extends TestCase
 
             $this->assertEquals([
                 'to' => 'ana@example.com',
-                'from' => '"Shop" <shop@example.com>',
+                'from' => 'Shop <shop@example.com>',
                 'subject' => 'Your order shipped',
                 'html' => '<p>On its way.</p>',
                 'text' => 'On its way.',
@@ -698,7 +740,7 @@ class PostHogApiTransportTest extends TestCase
     {
         $email = self::createEmail()->sender('shop@example.com')->returnPath('shop@example.com');
 
-        $this->assertSame('"Shop" <shop@example.com>', $this->sendAndGetBody($email)['from']);
+        $this->assertSame('Shop <shop@example.com>', $this->sendAndGetBody($email)['from']);
     }
 
     public function testInlineTextPartOfAnExplicitBodyIsSent()
@@ -754,6 +796,14 @@ class PostHogApiTransportTest extends TestCase
 
         yield 'sender header other than the From address' => [
             self::createEmail()->sender('bounce@example.com'),
+            'envelope_mismatch',
+            new Envelope(new Address('shop@example.com'), [new Address('ana@example.com')]),
+        ];
+
+        $email = self::createEmail()->returnPath('shop@example.com');
+        $email->getHeaders()->addPathHeader('Return-Path', 'bounce@example.com');
+        yield 'second return path other than the From address' => [
+            $email,
             'envelope_mismatch',
             new Envelope(new Address('shop@example.com'), [new Address('ana@example.com')]),
         ];
