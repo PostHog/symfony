@@ -350,7 +350,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
                 unset($attachments[$i]);
             } elseif ($part instanceof TextPart && isset($expected[$subtype = $part->getMediaSubtype()])) {
-                if (!self::hasSameText($part, $expected[$subtype])) {
+                if (!self::hasSameText($part, $expected[$subtype], 'html' === $subtype ? $email->getHtmlBody() : $email->getTextBody())) {
                     throw self::refuse('unsupported_part', \sprintf('the body holds a "%s/%s" part that differs from the email, which the API would send instead', $part->getMediaType(), $subtype));
                 }
 
@@ -399,9 +399,13 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         return $textParts;
     }
 
-    private static function hasSameText(TextPart $part, TextPart $built): bool
+    /**
+     * A custom part matches when it holds the text as written, which the API sends, or as Email builds it with the
+     * references to inline files rewritten to their content ids.
+     */
+    private static function hasSameText(TextPart $part, TextPart $built, string $written): bool
     {
-        return $part->getBody() === $built->getBody()
+        return \in_array($part->getBody(), [$written, $built->getBody()], true)
             && 0 === strcasecmp($part->getPreparedHeaders()->get('Content-Type')->getBodyAsString(), $built->getPreparedHeaders()->get('Content-Type')->getBodyAsString());
     }
 
