@@ -694,6 +694,20 @@ class PostHogApiTransportTest extends TestCase
         $this->assertArrayNotHasKey('template_id', $body);
     }
 
+    public function testSenderAndReturnPathOfTheFromAddressAreSent()
+    {
+        $email = self::createEmail()->sender('shop@example.com')->returnPath('shop@example.com');
+
+        $this->assertSame('"Shop" <shop@example.com>', $this->sendAndGetBody($email)['from']);
+    }
+
+    public function testInlineTextPartOfAnExplicitBodyIsSent()
+    {
+        $email = self::createEmail()->setBody(new AlternativePart((new TextPart('On its way.'))->setDisposition('inline'), new TextPart('<p>On its way.</p>', 'utf-8', 'html')));
+
+        $this->assertSame('On its way.', $this->sendAndGetBody($email)['text']);
+    }
+
     #[DataProvider('getRefusedEmails')]
     public function testRefusesWithoutSending(Email $email, string $code, ?Envelope $envelope = null)
     {
@@ -737,6 +751,30 @@ class PostHogApiTransportTest extends TestCase
         yield 'capture engagement that is not a boolean' => [$email, 'unsupported_header'];
 
         yield 'several senders' => [self::createEmail()->from('shop@example.com', 'help@example.com')->sender('shop@example.com'), 'unsupported_header'];
+
+        yield 'sender header other than the From address' => [
+            self::createEmail()->sender('bounce@example.com'),
+            'envelope_mismatch',
+            new Envelope(new Address('shop@example.com'), [new Address('ana@example.com')]),
+        ];
+
+        yield 'return path other than the From address' => [
+            self::createEmail()->returnPath('bounce@example.com'),
+            'envelope_mismatch',
+            new Envelope(new Address('shop@example.com'), [new Address('ana@example.com')]),
+        ];
+
+        yield 'explicit body with the text shown as an attachment' => [
+            self::createEmail()->setBody(new AlternativePart((new TextPart('On its way.'))->setDisposition('attachment'), new TextPart('<p>On its way.</p>', 'utf-8', 'html'))),
+            'unsupported_part',
+        ];
+
+        yield 'inline part referred to by its name and its content id' => [
+            self::createEmail()
+                ->html('<img src="cid:logo"><img src="cid:logo@shop.example">')
+                ->addPart((new DataPart('image-bytes', 'logo', 'image/png'))->asInline()->setContentId('logo@shop.example')),
+            'unsupported_part',
+        ];
 
         $email = self::createEmail();
         $email->getHeaders()->add(new TagHeader('receipts'));
