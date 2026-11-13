@@ -414,6 +414,34 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('<p>On its way.</p>', $body['html']);
     }
 
+    public function testExplicitBodyWithTheHtmlAsWrittenIsSent()
+    {
+        $html = '<img src="cid:logo">';
+        $logo = new DataPart('image-bytes', 'logo', 'image/png');
+        $email = self::createEmail()
+            ->html($html)
+            ->addPart($logo)
+            ->setBody(new MixedPart(new AlternativePart(new TextPart('On its way.'), new TextPart($html, 'utf-8', 'html')), $logo));
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame($html, $body['html']);
+        $this->assertSame('logo', $body['attachments'][0]['content_id']);
+    }
+
+    public function testBodyThatEmailBuiltIsSentWhenSetExplicitly()
+    {
+        $email = self::createEmail()
+            ->html('<img src="cid:logo">')
+            ->embed('image-bytes', 'logo', 'image/png');
+        $email->setBody($email->getBody());
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame('<img src="cid:logo">', $body['html']);
+        $this->assertSame('logo', $body['attachments'][0]['content_id']);
+    }
+
     public function testExplicitBodyLeavesTheAttachmentsOfTheEmailAsTheyAre()
     {
         $html = '<img src="cid:logo@shop.example">';
