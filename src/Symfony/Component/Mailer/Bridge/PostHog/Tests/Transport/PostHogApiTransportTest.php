@@ -368,6 +368,18 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('logo', $this->sendAndGetBody($email)['attachments'][0]['content_id']);
     }
 
+    public function testStyleReferenceToAPartWithItsOwnContentIdIsSentAsWritten()
+    {
+        $email = self::createEmail()
+            ->html('<div style="background: url(cid:logo)">')
+            ->addPart((new DataPart('image-bytes', 'logo', 'image/png'))->asInline()->setContentId('logo@shop.example'));
+
+        $body = $this->sendAndGetBody($email);
+
+        $this->assertSame('<div style="background: url(cid:logo)">', $body['html']);
+        $this->assertSame('logo', $body['attachments'][0]['content_id']);
+    }
+
     public function testAttachmentReferencedByTheHtmlIsSentInline()
     {
         $email = self::createEmail()
