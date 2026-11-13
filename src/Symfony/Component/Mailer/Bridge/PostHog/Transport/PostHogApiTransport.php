@@ -572,15 +572,16 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     }
 
     /**
-     * Keeps the display name of the sender, in quotes only when it holds a character that RFC 5322 reserves, such as a comma.
+     * Keeps the display name of the sender, in quotes only when it holds a character that RFC 5322 reserves, such as a comma,
+     * and its domain in Punycode, as Address::toString() writes it.
      */
     private static function formatSender(Address $address): string
     {
         if ('' === $name = $address->getName()) {
-            return $address->getAddress();
+            return $address->getEncodedAddress();
         }
 
-        return (false === strpbrk($name, '()<>[]:;@\\,."') ? $name : $address->getEncodedName()).' <'.$address->getAddress().'>';
+        return (false === strpbrk($name, '()<>[]:;@\\,."') ? $name : $address->getEncodedName()).' <'.$address->getEncodedAddress().'>';
     }
 
     /**
