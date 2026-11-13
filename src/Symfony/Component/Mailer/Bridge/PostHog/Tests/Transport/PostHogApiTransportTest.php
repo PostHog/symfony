@@ -121,6 +121,15 @@ class PostHogApiTransportTest extends TestCase
         $this->assertSame('shop@example.com', $this->sendAndGetBody($email)['from']);
     }
 
+    public function testSenderDomainIsSentInPunycode()
+    {
+        $named = $this->sendAndGetBody(self::createEmail()->from(new Address('shop@bücher.example', 'Shop')));
+        $bare = $this->sendAndGetBody(self::createEmail()->from('shop@bücher.example'));
+
+        $this->assertSame('Shop <shop@xn--bcher-kva.example>', $named['from']);
+        $this->assertSame('shop@xn--bcher-kva.example', $bare['from']);
+    }
+
     #[DataProvider('getSenderNames')]
     public function testSenderNameIsQuotedOnlyWhenItHoldsAReservedCharacter(string $name, string $expected)
     {
