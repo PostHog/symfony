@@ -25,7 +25,7 @@ where:
 
 PostHog has no SMTP relay, so the bridge only provides an API transport.
 
-The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses for recipients, so their display names are not sent; the display name of the sender is kept, in quotes when it holds a character such as a comma or a dot. An inline part is referred to by its name or by its content id, set with `setContentId()` or as a `Content-ID` header, and an attachment without a name is named after its type, such as `attachment.pdf`.
+The API transport carries one "To" address, the "Cc", "Bcc" and "Reply-To" addresses, the sender, the subject, the text and HTML bodies, attachments and inline images (referenced by their `cid`). The API takes bare addresses with ASCII domains for recipients, so their display names are not sent and a domain such as `bücher.example` is sent in Punycode; the display name of the sender is kept, in quotes when it holds a character such as a comma or a dot. An inline part is referred to by its name or by its content id, set with `setContentId()` or as a `Content-ID` header, and an attachment without a name is named after its type, such as `attachment.pdf`.
 
 Attachments are uploaded before the email is sent. The transport asks PostHog which files it does not have yet,
 uploads each of them to the file storage URL that PostHog answers, without the secret key, and then sends the email
@@ -36,6 +36,7 @@ must allow it. A failed upload sends no email.
 PostHog cannot carry everything an email can hold. Instead of dropping a part of the email, the transport refuses the whole email before any request and throws a `LogicException` whose message starts with `PostHog cannot send this email:` and a code:
 
  * `multiple_to`: no "To" address, or more than one
+ * `unsupported_address`: an address whose domain has no ASCII form in IDNA, such as one that mixes right-to-left and left-to-right letters
  * `unsupported_header`: a header other than the ones the transport reads, such as `X-Campaign` or `Content-Language`; more than one "From" address; a second `X-Track` or `X-PostHog-*` header; an `X-Track` header that does not set `opens` and `clicks` to `true`, `false` or `default`; or an `X-PostHog-Sensitive` or `X-PostHog-Capture-Engagement` header that is not `true` or `false`
  * `tags`, `metadata`: a `TagHeader` or a `MetadataHeader`
  * `envelope_mismatch`: an envelope whose sender is not the "From" address, or whose recipients are not the "To", "Cc" and "Bcc" addresses; or a `Sender` or `Return-Path` header other than the "From" address, as the API sends from that address

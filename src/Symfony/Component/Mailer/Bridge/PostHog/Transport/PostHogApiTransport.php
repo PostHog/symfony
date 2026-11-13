@@ -209,7 +209,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
         ];
 
         $template = $email instanceof RemoteTemplateEmail ? $email->getRemoteTemplate() : null;
-        $payload = ['to' => $to[0]->getAddress()] + (null === $template ? $this->getRenderedPayload($email, $options, $files) : $this->getTemplatePayload($email, $template));
+        $payload = ['to' => self::encodeAddress($to[0])] + (null === $template ? $this->getRenderedPayload($email, $options, $files) : $this->getTemplatePayload($email, $template));
 
         if (null !== $distinctId = $headers->getHeaderBody('X-PostHog-Distinct-Id')) {
             $payload['distinct_id'] = $distinctId;
@@ -242,7 +242,7 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
 
         foreach (['cc' => $email->getCc(), 'bcc' => $email->getBcc(), 'reply_to' => $email->getReplyTo()] as $field => $addresses) {
             if ($addresses) {
-                $payload[$field] = array_map(static fn (Address $address): string => $address->getAddress(), $addresses);
+                $payload[$field] = array_map(self::encodeAddress(...), $addresses);
             }
         }
 
@@ -572,16 +572,29 @@ final class PostHogApiTransport extends AbstractApiTransport implements RemoteTe
     }
 
     /**
-     * Keeps the display name of the sender, in quotes only when it holds a character that RFC 5322 reserves, such as a comma,
-     * and its domain in Punycode, as Address::toString() writes it.
+     * Keeps the display name of the sender, in quotes only when it holds a character that RFC 5322 reserves, such as a comma.
      */
     private static function formatSender(Address $address): string
     {
         if ('' === $name = $address->getName()) {
-            return $address->getEncodedAddress();
+            return self::encodeAddress($address);
         }
 
-        return (false === strpbrk($name, '()<>[]:;@\\,."') ? $name : $address->getEncodedName()).' <'.$address->getEncodedAddress().'>';
+        return (false === strpbrk($name, '()<>[]:;@\\,."') ? $name : $address->getEncodedName()).' <'.self::encodeAddress($address).'>';
+    }
+
+    /**
+     * The API takes ASCII domains only, so a domain such as bücher.example is sent in Punycode, as Address::toString() writes it.
+     *
+     * IDNA has no ASCII form for some domains that Address accepts, and the encoded address then ends at "@".
+     */
+    private static function encodeAddress(Address $address): string
+    {
+        if (str_ends_with($encoded = $address->getEncodedAddress(), '@')) {
+            throw self::refuse('unsupported_address', \sprintf('the domain of "%s" has no ASCII form, and the API takes ASCII domains only', $address->getAddress()));
+        }
+
+        return $encoded;
     }
 
     /**
